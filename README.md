@@ -109,3 +109,38 @@ Apesar de a infraestrutura já possuir características de sistemas distribuído
 
 
 Este documento consolida a visão de que a teoria acadêmica de computação distribuída encontra sua aplicação perfeita nas arquiteturas em nuvem modernas, provando que sistemas elásticos, seguros e altamente confiáveis são construídos através da união entre engenharia de software rigorosa, automação e uma profunda compreensão dos princípios de resiliência.
+
+
+## Rodando localmente
+
+```bash
+npm install
+cp .env.example .env   # preencha com seus dados de RDS/S3
+npm run dev
+```
+
+
+A API sobe em `http://localhost:3000`.
+
+## Rotas
+
+| Método | Rota          | Descrição                          |
+|--------|---------------|--------------------------------------|
+| GET    | `/`           | Health check                         |
+| GET    | `/usuarios`   | Lista todos os usuários              |
+| GET    | `/usuarios/:id` | Busca um usuário pelo id           |
+| POST   | `/usuarios`   | Cria um usuário (`nome`, `email`, `foto_url`) |
+| PUT    | `/usuarios/:id` | Atualiza um usuário                |
+| DELETE | `/usuarios/:id` | Remove um usuário                  |
+| POST   | `/upload`     | Upload de imagem (form-data, campo `imagem`) → retorna a URL pública no S3 |
+
+## Banco de dados
+
+Execute `src/db/schema.sql` no seu MySQL (RDS) antes de usar a API.
+
+## Docker
+
+```bash
+docker build -t api-backend .
+docker run -p 3000:3000 --env-file .env api-backend
+```
