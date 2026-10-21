@@ -9,6 +9,8 @@ Para garantir a universalidade do conhecimento, toda a arquitetura foi desenhada
 
 Abri na comunidade do Discord um grupo para discutirmos sobre ensino de tecnologia no Brasil em diversos níveis de cursos: https://www.rafaellevi.com.br/comunidade-discord.html
 
+Slides: https://docs.google.com/presentation/d/1DbV2CEUvWZv4q2X1mbOf2k0FChxcdL_R/edit?usp=sharing&ouid=101434183171033890314&rtpof=true&sd=true
+
 ---
 
 ### 1. Fundamentação Pedagógica: A Teoria de Tanenbaum na Prática
