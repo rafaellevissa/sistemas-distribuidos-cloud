@@ -7,6 +7,8 @@ Este documento detalha o projeto educacional concebido para o ensino prático de
 
 Para garantir a universalidade do conhecimento, toda a arquitetura foi desenhada de forma **agnóstica de nuvem**, permitindo que os conceitos sejam aplicados em qualquer provedor de computação em nuvem ou até mesmo em topologias *multicloud*.
 
+Abri na comunidade do Discord um grupo para discutirmos sobre ensino de tecnologia no Brasil em diversos níveis de cursos: https://www.rafaellevi.com.br/comunidade-discord.html
+
 ---
 
 ### 1. Fundamentação Pedagógica: A Teoria de Tanenbaum na Prática
