@@ -1,0 +1,97 @@
+name: Foundation Plan And Approved Apply
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, prod]
+        default: dev
+        required: true
+      apply:
+        description: Apply the saved plan after environment approval
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: platform-gcp-${{ inputs.environment }}
+  cancel-in-progress: false
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      artifact-id: ${{ steps.plan-artifact.outputs.artifact-id }}
+      artifact-url: ${{ steps.plan-artifact.outputs.artifact-url }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm ci
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: '1.11.4'
+          terraform_wrapper: false
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_PLAN_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+      - run: node --require ./scripts/isolate-credentials.js platform/cli/src/index.js plan --target gcp --environment "$ENVIRONMENT" --stack foundation
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+      - id: plan-artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: foundation-plan
+          path: |
+            .platform/gcp/${{ inputs.environment }}/foundation/reviewed.tfplan
+            .platform/gcp/${{ inputs.environment }}/foundation/plan.json
+            .platform/gcp/${{ inputs.environment }}/foundation/plan.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+      - name: Link the exact plan for approval
+        run: printf 'Review plan.txt and plan.json in [foundation plan artifact](%s) before approving apply. Commit `%s`. No runtime release is included.\n' "$ARTIFACT_URL" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          ARTIFACT_URL: ${{ steps.plan-artifact.outputs.artifact-url }}
+  apply:
+    needs: plan
+    if: inputs.apply && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ needs.plan.outputs.artifact-url }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm ci
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: '1.11.4'
+          terraform_wrapper: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.plan.outputs.artifact-id }}
+          merge-multiple: true
+          path: .platform/gcp/${{ inputs.environment }}/foundation
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_APPLY_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+      - run: node --require ./scripts/isolate-credentials.js platform/cli/src/index.js apply --target gcp --environment "$ENVIRONMENT" --stack foundation --confirm "gcp/$ENVIRONMENT/foundation"
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}

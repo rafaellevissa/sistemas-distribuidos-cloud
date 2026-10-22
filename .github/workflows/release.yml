@@ -1,0 +1,97 @@
+name: Build Image And Runtime Plan Only
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, prod]
+        default: dev
+        required: true
+      secret_version:
+        description: Existing numeric runtime Secret Manager version (not payload)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: platform-gcp-${{ inputs.environment }}
+  cancel-in-progress: false
+jobs:
+  build-plan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm run lint && npm test
+      - run: npm run platform -- validate --target gcp --environment "$ENVIRONMENT"
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+      - name: Check foundation publisher and registry contract before authentication
+        run: |
+          node -e 'const { loadConfig } = require("./platform/cli/src/config"); const config = loadConfig({ target: "gcp", environment: process.env.ENVIRONMENT }); if (config.buildServiceAccount !== process.env.BUILD_SERVICE_ACCOUNT) throw new Error("GCP_RELEASE_PLAN_SERVICE_ACCOUNT must match manifest buildServiceAccount"); if (process.env.ARTIFACT_REPOSITORY !== `distributed-cloud-${config.environment}`) throw new Error("GCP_ARTIFACT_REPOSITORY must match the foundation repository ID");'
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          BUILD_SERVICE_ACCOUNT: ${{ vars.GCP_RELEASE_PLAN_SERVICE_ACCOUNT }}
+          ARTIFACT_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: '1.11.4'
+          terraform_wrapper: false
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASE_PLAN_SERVICE_ACCOUNT }}
+          token_format: access_token
+          create_credentials_file: true
+          export_environment_variables: true
+      - id: config
+        run: |
+          node scripts/isolate-credentials.js
+          node scripts/release-config.js
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          ARTIFACT_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
+          SECRET_VERSION: ${{ inputs.secret_version }}
+      - name: Login to regional Artifact Registry
+        run: printf '%s' "$ACCESS_TOKEN" | docker login --username oauth2accesstoken --password-stdin "$REGISTRY"
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          REGISTRY: ${{ steps.config.outputs.registry }}
+      - name: Push commit-tagged image with SBOM and provenance
+        run: |
+          docker buildx create --use
+          docker buildx build --platform linux/amd64 --push --provenance=mode=max --sbom=true --tag "$IMAGE:$GITHUB_SHA" --metadata-file .platform/build.json --file apps/api/Dockerfile .
+        env:
+          IMAGE: ${{ steps.config.outputs.image }}
+      - id: descriptor
+        run: node scripts/release-descriptor.js
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          IMAGE: ${{ steps.config.outputs.image }}
+          SECRET_VERSION: ${{ inputs.secret_version }}
+      - name: Create runtime plan (no schema gate or apply)
+        run: npm run platform -- deploy --target gcp --environment "$ENVIRONMENT" --image "$IMAGE" --secret-version "$SECRET_VERSION"
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          IMAGE: ${{ steps.descriptor.outputs.image }}
+          SECRET_VERSION: ${{ inputs.secret_version }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: runtime-plan-and-release-descriptor
+          path: |
+            .platform/release.json
+            .platform/gcp/${{ inputs.environment }}/runtime/reviewed.tfplan
+            .platform/gcp/${{ inputs.environment }}/runtime/plan.json
+            .platform/gcp/${{ inputs.environment }}/runtime/plan.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
