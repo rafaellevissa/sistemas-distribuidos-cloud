@@ -1,0 +1,25 @@
+{
+  "name": "@distributed-cloud/api",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "start": "npm run db:schema && node src/server.js",
+    "db:schema": "node src/db/apply-schema.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1120.0",
+    "@aws-sdk/s3-request-presigner": "^3.1120.0",
+    "@google-cloud/storage": "^8.4.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "multer": "^2.4.0",
+    "mysql2": "^3.11.3"
+  },
+  "devDependencies": {
+    "supertest": "^7.1.4"
+  }
+}
