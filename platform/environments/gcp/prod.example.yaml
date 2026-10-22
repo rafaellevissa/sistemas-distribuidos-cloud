@@ -1,0 +1,16 @@
+schemaVersion: 1
+target: gcp
+environment: prod
+productionEnabled: false
+profile: ha
+projectId: REPLACE_DEDICATED_PRODUCTION_PROJECT
+region: us-central1
+hostname: REPLACE_HOSTNAME
+stateBucket: REPLACE_PRODUCTION_STATE_BUCKET
+storageBucket: REPLACE_PRODUCTION_STORAGE_BUCKET
+buildServiceAccount: REPLACE_BUILD_SERVICE_ACCOUNT
+githubRepository: REPLACE_OWNER/REPLACE_REPOSITORY
+sizing:
+  minReplicas: 2
+  maxReplicas: 3
+  dbTier: db-custom-2-7680

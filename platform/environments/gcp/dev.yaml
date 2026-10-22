@@ -1,0 +1,15 @@
+schemaVersion: 1
+target: gcp
+environment: dev
+profile: economy
+projectId: REPLACE_PROJECT_ID
+region: us-central1
+hostname: REPLACE_HOSTNAME
+stateBucket: REPLACE_STATE_BUCKET
+storageBucket: REPLACE_STORAGE_BUCKET
+buildServiceAccount: REPLACE_BUILD_SERVICE_ACCOUNT
+githubRepository: REPLACE_OWNER/REPLACE_REPOSITORY
+sizing:
+  minReplicas: 1
+  maxReplicas: 2
+  dbTier: db-f1-micro
