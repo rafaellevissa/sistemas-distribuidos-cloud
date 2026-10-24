@@ -1,0 +1,16 @@
+schemaVersion: 1
+target: gcp
+environment: prod
+productionEnabled: true
+profile: ha
+projectId: dev-performance-359512
+region: us-central1
+hostname: rafaellevi.com.br
+stateBucket: sistemas-distribuidos-cloud
+storageBucket: sistemas-distribuidos-cloud-storage
+buildServiceAccount: distributed-cloud-prod-build@dev-performance-359512.iam.gserviceaccount.com
+githubRepository: rafaellevissa/sistemas-distribuidos-cloud
+sizing:
+  minReplicas: 2
+  maxReplicas: 3
+  dbTier: db-g1-small

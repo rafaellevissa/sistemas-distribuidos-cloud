@@ -1,4 +1,83 @@
-# sistemas-distribuidos-cloud
+# Distributed Cloud Platform
+
+A GCP-first infrastructure platform based on the existing AWS teaching API. The application remains JavaScript/Express with the same user CRUD, MySQL schema and image upload contract. The original AWS repository is not modified.
+
+## Current implementation
+
+| Area | Available now | Verification boundary |
+| --- | --- | --- |
+| API | Existing CRUD, native S3 and Cloud Storage adapters, configurable provider | HTTP contracts and SDK adapters tested locally |
+| Local environment | Docker Compose with MySQL and S3-compatible MinIO | Compose config validated; Docker daemon required to run |
+| GCP infrastructure | Bootstrap/WIF, private foundation, COS regional MIG, HTTPS load balancer and Cloud Armor | Terraform schemas and mocked plans tested; not deployed |
+| Platform CLI | Config validation, reviewed plans, context-bound apply, status, dev runtime destroy plans | Offline contract tests; requires real inputs and credentials for cloud operations |
+| GitHub Actions | PR CI, protected foundation plan/apply, image build and runtime plan, destroy plan | Not executed in GitHub; configure environments and IAM first |
+| Release automation | Immutable image references, SBOM/provenance and readable plan artifacts | Runtime release is **plan-only**; automated schema gate, scans and rollback remain work |
+
+Only **GCP** is an infrastructure target today. S3 is supported by the application storage adapter; this does not mean AWS Terraform deployment is implemented. Kubernetes, cross-cloud replication and failover are outside this first delivery.
+
+## Repository layout
+
+```text
+apps/api/                    Existing API and storage adapters
+platform/cli/                Shared configuration and Terraform CLI
+platform/config/             Nonsecret environment schema
+platform/environments/gcp/   Dev template and optional prod example
+platform/providers/gcp/      COS startup script and tests
+infra/bootstrap/gcp/         State bucket, WIF and CI identities
+infra/stacks/gcp/foundation/ Network, SQL, storage, registry and runtime identities
+infra/stacks/gcp/runtime/    Digest-pinned MIG and HTTPS edge
+tests/                      MySQL integration and HTTPS smoke checks
+docs/                       Architecture, onboarding and operations
+```
+
+## Local quick start
+
+Prerequisites: Node 24 (see `.nvmrc`), npm, and an active Docker Engine with Compose v2. Local passwords in Compose are disposable examples, not cloud credentials. Ports bind to localhost; ensure 3000, 3306, 9000 and 9001 are free.
+
+```sh
+npm ci
+npm run lint
+npm test
+docker compose up --build -d
+docker compose logs -f api
+```
+
+The API is at `http://localhost:3000`. Use `GET /`, `/usuarios` for CRUD, and `POST /upload` with multipart field `imagem` (image MIME, maximum 5 MiB). Upload returns `mensagem`, `url` and `key`; the read URL expires after one hour. MinIO is local S3-compatible storage, not a Cloud Storage emulator.
+
+```sh
+curl http://localhost:3000/
+curl -H 'Content-Type: application/json' -d '{"nome":"Demo","email":"demo@example.test"}' http://localhost:3000/usuarios
+docker compose down
+```
+
+For the real database integration test against this disposable local database:
+
+```sh
+INTEGRATION_DB_HOST=127.0.0.1 INTEGRATION_DB_USER=local_api INTEGRATION_DB_PASSWORD=local-api-disposable npm run test:integration
+```
+
+`docker compose down` retains local data. `docker compose down --volumes` irreversibly removes the local database and uploads. Never use these local credentials in a cloud environment.
+
+## GCP onboarding
+
+Start with [the operator guide](docs/onboarding/gcp.md), then review [Terraform contracts and security boundaries](docs/architecture/terraform.md) and [platform operations](docs/operations/platform.md). Create a project with billing, choose a region and control a DNS hostname before provisioning. Documentation and new guides are in English.
+
+```sh
+npm run platform -- validate --target gcp --environment dev --example
+npm run platform -- validate --target gcp --environment prod --example
+npm run platform -- --help
+```
+
+`--example` validates template structure only. Replace the manifest placeholders and commit reviewed configuration before a real plan. Initial bootstrap is an owner operation, not an automatic CLI action. No cloud resources are created by installation or tests.
+
+**Do not apply runtime until the schema has succeeded in an authorized private job.** That automated job/gate is not implemented yet. Foundation creates secret containers, not SQL passwords or users; secure provisioning is an explicit operator prerequisite. Other remaining work includes live GCP acceptance, SQL transport encryption, narrow plan/build IAM, monitoring/budget alerts, image verification and automated rollback. See the architecture guide before enabling the workflows.
+
+This is an **unauthenticated public demo**: anyone can modify records and upload files. HTTPS, private infrastructure and WAF do not provide user authorization. Use synthetic data only. The prod profile adds infrastructure safeguards, not certification for real-user production. Cloud SQL, load balancer, NAT, disks and logging can incur recurring costs; no spending cap is implemented.
+
+## Original educational brief
+
+The original Portuguese brief below records the educational vision, including future goals. It is **not** an implementation or availability guarantee. In particular, multi-region disaster recovery, public permanent image URLs and zero-error chaos experiments are not properties of the current platform.
+
 Projeto de engenharia do caos em cima de sistemas distribuídos, uma abordagem pedagógica. Uso de computação em nuvem, iac, Devops, CI/CD, pipelines, docker, containerização, gestão de secrets, disaster recovery, DNS, multi-AZ, multicloud, tolerância a falhas, transparências de Tanenbaum, escalabilidade, Openness, Confiabilidade, Load Balancer.
 
 **Infraestrutura para Sistemas Distribuídos e Engenharia do Caos: Uma Abordagem Pedagógica e Prática**
