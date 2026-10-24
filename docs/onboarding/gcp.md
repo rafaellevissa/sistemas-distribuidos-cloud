@@ -29,6 +29,7 @@ Edit the tracked dev manifest locally and commit reviewed configuration. For pro
 | `sizing.minReplicas` | Integer 1-10; HA requires at least 2 |
 | `sizing.maxReplicas` | Integer 1-10, at least minReplicas |
 | `sizing.dbTier` | GCP Cloud SQL tier ID; validate regional availability and profile compatibility |
+| `sizing.dbTier` | GCP Cloud SQL tier ID; validate regional availability. A demo can use shared-core `db-g1-small` to reduce cost, including with regional configuration, but shared-core tiers are intended for test/development and are excluded from the Cloud SQL SLA. Use dedicated cores for production HA guarantees. |
 
 Unknown properties, including secret fields, are rejected. These limits do not establish a safe database connection budget: check pool connections times max replicas plus schema/operations reserve against the chosen SQL tier.
 

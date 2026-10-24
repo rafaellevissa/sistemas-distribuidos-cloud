@@ -30,10 +30,6 @@ variable "profile" {
 variable "db_tier" {
   type    = string
   default = "db-f1-micro"
-  validation {
-    condition     = var.profile != "ha" || !contains(["db-f1-micro", "db-g1-small"], var.db_tier)
-    error_message = "HA requires a dedicated-core Cloud SQL tier, e.g. db-custom-2-7680."
-  }
 }
 variable "bucket_name" {
   type = string

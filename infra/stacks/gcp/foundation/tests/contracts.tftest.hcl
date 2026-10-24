@@ -40,14 +40,25 @@ run "protected_ha" {
     condition     = google_sql_database_instance.app.deletion_protection && google_sql_database_instance.app.settings[0].deletion_protection_enabled && google_sql_database_instance.app.settings[0].availability_type == "REGIONAL"
     error_message = "Prod requires both SQL deletion protections and regional availability."
   }
+  assert {
+    condition     = google_sql_database_instance.app.settings[0].tier == "db-custom-2-7680"
+    error_message = "The production reference profile should use dedicated cores."
+  }
+}
+run "demo_regional_with_shared_core" {
+  command = plan
+  variables {
+    environment = "prod"
+    profile     = "ha"
+    db_tier     = "db-g1-small"
+  }
+  assert {
+    condition     = google_sql_database_instance.app.settings[0].tier == "db-g1-small" && google_sql_database_instance.app.settings[0].availability_type == "REGIONAL"
+    error_message = "A demo may select the low-cost shared-core tier while retaining regional configuration; this does not provide the Cloud SQL SLA."
+  }
 }
 run "reject_prod_economy" {
   command = plan
   variables { environment = "prod" }
   expect_failures = [var.profile]
-}
-run "reject_shared_core_ha" {
-  command = plan
-  variables { profile = "ha" }
-  expect_failures = [var.db_tier]
 }
