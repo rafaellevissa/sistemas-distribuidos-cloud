@@ -9,7 +9,15 @@ test('smoke requires an HTTPS URL without embedded credentials or query', () => 
   assert.equal(apiUrl('https://example.test/api').href, 'https://example.test/api/');
 });
 
-test('smoke verifies CRUD, upload and anonymous signed read with bounded requests', async () => {
+test('demo HTTP requires explicit opt-in and still rejects unsafe URLs', () => {
+  assert.equal(apiUrl('http://127.0.0.1', { allowHttp: true }).href, 'http://127.0.0.1/');
+  for (const value of ['ftp://example.test', 'http://user:password@example.test', 'http://example.test?secret=x']) {
+    assert.throws(() => apiUrl(value, { allowHttp: true }));
+  }
+});
+
+for (const protocol of ['https', 'http']) {
+test(`smoke verifies ${protocol.toUpperCase()} CRUD, upload and HTTPS signed read with bounded requests`, async () => {
   let image;
   let deleted = false;
   const calls = [];
@@ -42,10 +50,11 @@ test('smoke verifies CRUD, upload and anonymous signed read with bounded request
     if (route === '/usuarios') return Response.json([fetchImpl.user]);
     return deleted ? Response.json({ mensagem: 'Usuario nao encontrado' }, { status: 404 }) : Response.json(fetchImpl.user);
   };
-  assert.deepEqual(await runSmoke('https://api.example.test', { fetchImpl, log() {} }), { key: 'smoke.png' });
+  assert.deepEqual(await runSmoke(`${protocol}://api.example.test`, { fetchImpl, allowHttp: protocol === 'http', log() {} }), { key: 'smoke.png' });
   assert.ok(calls.some((call) => call.url === signed));
   assert.equal(deleted, true);
 });
+}
 
 test('smoke cleans up created users when a later step fails', async () => {
   let deleted = false;

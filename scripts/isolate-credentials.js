@@ -2,11 +2,11 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROOT } = require('../platform/cli/src/paths');
+const root = path.resolve(__dirname, '..');
 
 const source = process.env.GOOGLE_GHA_CREDS_PATH;
 if (!source || !process.env.GITHUB_ENV) throw new Error('Expected GitHub OIDC credential file and environment file');
-const directory = path.join(ROOT, '.platform');
+const directory = path.join(root, '.platform');
 fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 fs.chmodSync(directory, 0o700);
 const destination = path.join(directory, 'oidc-credentials.json');

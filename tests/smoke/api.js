@@ -1,18 +1,18 @@
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 
-function apiUrl(value) {
+function apiUrl(value, { allowHttp = false } = {}) {
   if (!value) throw new Error('Provide an HTTPS API URL as the first argument or SMOKE_API_URL/API_BASE_URL/API_URL');
   const url = new URL(value);
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
-    throw new Error('API URL must use HTTPS without credentials, query or fragment');
+  if ((url.protocol !== 'https:' && !(allowHttp && url.protocol === 'http:')) || url.username || url.password || url.search || url.hash) {
+    throw new Error('API URL must use HTTPS (or explicitly allow demo HTTP) without credentials, query or fragment');
   }
   if (!url.pathname.endsWith('/')) url.pathname += '/';
   return url;
 }
 
-async function runSmoke(value, { fetchImpl = fetch, timeoutMs = 15000, log = console.log } = {}) {
-  const base = apiUrl(value);
+async function runSmoke(value, { fetchImpl = fetch, timeoutMs = 15000, log = console.log, allowHttp = false } = {}) {
+  const base = apiUrl(value, { allowHttp });
   assert.ok(Number.isInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 60000, 'timeoutMs must be between 1 and 60000');
   async function send(url, options = {}, expected = 200, binary = false) {
     const response = await fetchImpl(url, {
@@ -80,7 +80,9 @@ async function runSmoke(value, { fetchImpl = fetch, timeoutMs = 15000, log = con
 }
 
 if (require.main === module) {
-  runSmoke(process.argv[2] || process.env.SMOKE_API_URL || process.env.API_BASE_URL || process.env.API_URL).catch((error) => {
+  runSmoke(process.argv[2] || process.env.SMOKE_API_URL || process.env.API_BASE_URL || process.env.API_URL, {
+    allowHttp: process.env.SMOKE_ALLOW_HTTP === 'true',
+  }).catch((error) => {
     console.error(`Smoke failed: ${error.message}`);
     process.exitCode = 1;
   });

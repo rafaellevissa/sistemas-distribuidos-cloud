@@ -1,61 +1,86 @@
-# Platform Operations
+# Deployment Operations
 
-All commands below use the tracked, nonsecret environment manifest and repository-root resolution, regardless of the caller's current directory. Commit reviewed code/config changes before creating plans. Examples containing `REPLACE` are deliberately not executable cloud input. Keep cloud credentials outside source control and chat.
+Use the [onboarding sequence](../onboarding/gcp.md) for the first deployment. All commands here start at repository root and use the same application backend and ordinary local tfvars. Protect state/plans and operate only on nonsensitive public demo data.
 
-## Foundation Plan And Apply
+## Repeat Releases
 
-```sh
-npm run platform -- plan --target gcp --environment dev --stack foundation
-terraform -chdir=infra/stacks/gcp/foundation show "$PWD/.platform/gcp/dev/foundation/reviewed.tfplan"
-npm run platform -- apply --target gcp --environment dev --stack foundation --confirm gcp/dev/foundation
-npm run platform -- outputs --target gcp --environment dev --stack foundation
-```
+Keep `enable_runtime = true` throughout an existing deployment. Never restore the initial false/empty example on later plans.
 
-The CLI also writes private `.platform/gcp/dev/foundation/plan.txt` from `terraform show -no-color` against the exact saved binary plan. Inspect it before apply. For a separate `terraform show`, use the same stack `TF_DATA_DIR` as the CLI if provider schemas are required: set it to the absolute repository path plus `.platform/gcp/dev/foundation/terraform`. Prefer an absolute saved-plan path to avoid confusion with `-chdir`. Do not post plan text, JSON or logs to public reviews.
+1. Choose a unique release tag. Run `make build TAG=release-001`, then `make push TAG=release-001`; record the full printed digest.
+2. Run `make db-init IMAGE=REGISTRY/api@sha256:DIGEST`. Stop if schema or cleanup fails. New schema must remain compatible with the currently running image until rollout completes.
+3. Edit `infra/terraform.tfvars`: persist the new `image` and retain `enable_runtime = true`. Do not leave a competing release auto-tfvars file or environment override active.
+4. Run `make plan`, inspect `terraform -chdir=infra show -no-color reviewed.tfplan` privately, then explicitly run `make apply` on that saved plan.
+5. Check rollout/backend health, run the smoke test and record the accepted digest. Keep prior compatible image references for deliberate rollback.
 
-The infrastructure workflow uploads the saved binary, metadata and readable text, then optionally waits at protected `dev`/`prod` for apply. Open the artifact link on that apply approval and the plan job summary; inspect `plan.txt` and verify the intended operation, commit, target/environment/stack and backend in `plan.json`. Apply retrieves only the immutable artifact ID emitted by the plan job in that same run. It never accepts an arbitrary run ID or external artifact. Approving the initial plan job is not approval of its eventual output. If the artifact is expired, unavailable or differs from the intended operation, reject apply and create a fresh run. Artifact access is limited by repository permissions, not environment reviewers alone; private/sensitive infrastructure must not use publicly readable artifacts or logs.
+Schema changes happen before review/apply and are not reversed if a later deployment is rejected. The current schema is idempotent; arbitrary future migrations are not guaranteed safe. A rollback is a fresh reviewed plan with a previous compatible digest, not a schema reversal. Secret rotation and restore exercises need separate owner-approved procedures.
 
-An apply requires an existing plan and matching target/environment/stack confirmation. Changed config, commit, dirty worktree, variables, foundation output or plan bytes require a new reviewed plan. A failed/attempted apply consumes metadata; do not retry the old plan by reconstructing metadata. Never bypass a refusal by switching to unreviewed direct `terraform apply`.
+`make apply` never plans and never passes `-auto-approve`. Terraform considers an explicit saved-plan apply approved without a second prompt. If the state changed, the backend differs, the plan expired or an apply failed/was interrupted, investigate and create a fresh reviewed plan rather than disabling locks or forcing an old artifact. Local plan files contain secrets even when `terraform show` redacts them.
 
-## Runtime Planning
+## Health And Smoke
 
-```sh
-npm run platform -- deploy --target gcp --environment dev --image us-central1-docker.pkg.dev/REPLACE_PROJECT/REPLACE_REPOSITORY/api@sha256:REPLACE_DIGEST --secret-version 1
-npm run platform -- status --target gcp --environment dev --stack runtime
-```
-
-`deploy` is an alias for runtime **plan**, not application deployment. The equivalent is `plan --stack runtime`. It initializes foundation and reads `terraform output -json platform`, passes that nonsecret object into runtime, and binds it into plan metadata. Images must match the manifest project and region. Numeric secret versions must already exist.
-
-After an owner-reviewed schema execution succeeds, the explicitly authorized owner may apply the saved runtime plan with the **same** `--image`, `--secret-version`, and `--confirm gcp/dev/runtime`. The CLI cannot prove schema execution. There is no automated runtime apply workflow until a real schema runner, result checking and cleanup gate are integrated. Do not treat the release artifact's `schemaGate: "not-implemented"` as success.
-
-The build workflow pushes the commit SHA tag, never `latest`, and resolves a digest from BuildKit metadata. Configure immutable tags in Artifact Registry; re-running a build for the same commit may fail instead of replacing a tag. Promote the recorded digest instead of rebuilding when an approved promotion process is added. SBOM/provenance attestations are attached to the registry image index, not standalone reviewed scan evidence. Add policy verification and vulnerability scanning before runtime deployment automation.
-
-`status`/`outputs` read Terraform outputs, not the live API or health checker. For incidents, separately check HTTPS, MIG rollout status, SQL availability, application logs and object signing. The application root probe establishes HTTP liveness only, not DB-aware readiness.
-
-## Rollback And Secret Rotation
-
-Record prior image digest, numeric secret version, config hash and commit in the release history. Rollback means a fresh Terraform runtime plan using a known compatible previous digest and secret version, review, then authorized saved-plan apply after schema compatibility review. Never automatically reverse a schema change or use ad-hoc SSH/gcloud instance changes to fight Terraform ownership. Credential rotation requires a deliberate SQL/Secret Manager synchronization procedure; changing a pinned version does not create the secret or SQL user.
-
-No automated rollback, secret rotation, database restore or schema runner is implemented here. Before production activation, the operations owner must write and exercise those provider-specific procedures and prove backup restore, signed URL access without exported keys, and restricted runtime DML permissions.
-
-## Destruction
+Terraform completion does not mean the rolling update, LB health or database is ready. For the current deployment:
 
 ```sh
-npm run platform -- destroy --target gcp --environment dev --stack runtime --image us-central1-docker.pkg.dev/REPLACE_PROJECT/REPLACE_REPOSITORY/api@sha256:REPLACE_DIGEST --secret-version 1 --confirm gcp/dev/runtime --allow-data-loss
+deployment=$(terraform -chdir=infra output -json deployment)
+project=$(printf '%s' "$deployment" | jq -r '.project_id')
+region=$(printf '%s' "$deployment" | jq -r '.region')
+mig=$(printf '%s' "$deployment" | jq -er '.mig')
+gcloud compute instance-groups managed wait-until "$mig" --stable --project="$project" --region="$region" --timeout=900
+gcloud compute instance-groups managed list-instances "$mig" --project="$project" --region="$region"
+gcloud compute backend-services list --project="$project" --global
 ```
 
-This writes a destroy **plan only**. Review it, then apply the saved plan with the same image/secret inputs, `--stack runtime --confirm gcp/dev/runtime --allow-data-loss`. The data-loss flag must be repeated for apply. Production destroy and foundation/bootstrap destroy are rejected even with confirmation. Runtime destruction can remove serving infrastructure and does not promise zero data loss from provider behavior or in-flight requests.
+Confirm healthy API instances in both configured zones. Inspect `gcloud compute backend-services get-health BACKEND_NAME --global --project="$project"` using this application's backend from the list; do not assume unrelated project backends belong to this root.
 
-The manual destroy workflow only produces an artifact; no remote destroy apply job exists. An authorized local operator can retrieve that same-run artifact into the correct private stack directory at its exact clean commit, review it and apply through the CLI with dev consent. Preserve artifact confidentiality and file permissions. Do not reconstruct a missing plan from metadata.
+```sh
+url=$(terraform -chdir=infra output -raw api_url)
+curl --fail --retry 30 --retry-all-errors --retry-delay 10 --max-time 10 "$url"
+make smoke SMOKE_ALLOW_HTTP=true
+```
 
-For owner retrieval, first verify the exact run, workflow, `main` branch, full commit SHA, environment and successful plan job in GitHub. Use the exact numeric artifact ID linked from that verified run, not a name-only lookup or an artifact from a PR/fork. Download through the authenticated GitHub artifact API/UI into a private temporary directory, check archive entries before extraction, and copy only `reviewed.tfplan`, `plan.json`, `plan.txt` (plus `release.json` for runtime planning records) into the expected ignored paths. Never extract arbitrary paths over the checkout. Set stack directories to 0700 and files to 0600. Check out the recorded commit with a clean worktree and use its committed manifest; do not edit configuration to force hash agreement. Independently review the binary with Terraform when provenance is uncertain. The CLI's hashes detect mismatch, not malicious replacement of both plan and metadata. Runtime apply still requires independently verified schema success; retrieving a release artifact does not satisfy that gate.
+HTTP requires the explicit smoke opt-in and is only for this demo. Signed GCS reads remain HTTPS. Root liveness alone does not establish SQL readiness: smoke performs CRUD, upload and signed read. It removes its demo user but leaves the uploaded object; account for object/version retention and clean up through an authorized data-retention process. Smoke failure after apply reports a failed release; it does not automatically roll back.
 
-Foundation resources continue costing money after runtime teardown. The owner must separately inventory dependencies, export/verify backups, review SQL/storage deletion protection, remove runtime references, and plan foundation teardown under a deliberate data-retention decision. Never disable protection or purge a bucket as an automatic cleanup step. Keep state, federation and bootstrap until all dependent resources and recovery records are accounted for; owner-only bootstrap dismantling is last. This workspace intentionally does not implement that destructive procedure.
+## Schema Failures
 
-## Costs And Security
+The schema script defaults to a 900-second timeout and 10-second polling; `SCHEMA_TIMEOUT_SECONDS` and `SCHEMA_POLL_SECONDS` can be set within its validated bounds. It reports guest-attribute success only after the container exits successfully and attempts VM deletion on all normal exits. It does not print secret-bearing serial logs.
 
-Cloud SQL, load balancers, Cloud NAT, storage, registry, logging and backup retention may have baseline charges with no traffic. `economy` is not free or scale-to-zero; one replica and single-zone SQL do not provide HA. HA costs more and is not region-level disaster recovery. Get region-specific estimates before apply and review quota/connection limits. Billing alerts are notifications, not spending caps. Runtime destroy does not stop foundation charges.
+If the process/runner is forcibly terminated, a `schema-*` VM can remain. Use `gcloud compute instances list --project=PROJECT --filter='name~^schema-'` to identify it, verify ownership/zone and confirm it is not an active task. Delete only the confirmed orphan with `gcloud compute instances delete VM --project=PROJECT --zone=ZONE`. Never delete every similarly named VM blindly. Check IAM, registry access, NAT, private SQL, Secret Manager access and schema compatibility before retrying. Do not enable a public SQL IP as a workaround.
 
-Use short-lived ADC/WIF credentials and separate identities. Terraform plans/state can contain sensitive values even when terminal output is masked. Restrict bucket and artifact readers, enable backend versioning/audit policy, and never commit state, `.platform/`, tfvars, credentials or secret payloads. GitHub mutation workflows share `platform-gcp-ENVIRONMENT`; coordinate local runs explicitly as well. Backend locks are per stack, not a global release transaction.
+## GitHub Actions
 
-Production additionally requires a dedicated project, approved `prod.yaml` activation, HA sizing/SQL review, protected GitHub environments, restrictive WIF bindings, deletion protections, recovery drills, cost approval, and identity/authorization work if the application will handle anything beyond public disposable demo data.
+Credential-free CI keeps npm checks, unit tests, disposable MySQL integration, Docker build and Terraform validation/mock tests. It does not obtain OIDC credentials or deploy. Bootstrap checks only initialize with `-backend=false`; they never apply or migrate bootstrap.
+
+Cloud workflows are manual and **require a private repository** because plans now contain SQL passwords. Repository readers with Actions access may download artifacts; environment reviewers are not the only readers. Restrict collaborator/artifact/log access accordingly. Public repositories must use the protected local sequence rather than publishing plans. One-day retention reduces exposure but is not encryption or per-environment access control.
+
+Set these reviewed, nonsecret GitHub repository/environment variables. Never store secret payloads or service-account JSON keys in them:
+
+| Variable | Value |
+| --- | --- |
+| `GCP_GITHUB_ENVIRONMENT` | **Repository-level** variable: exact existing WIF-trusted GitHub Environment name; fallback is `dev`. If existing trust uses `prod`, set `prod`; this is identity compatibility, not a second application environment |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Existing full WIF provider identifier |
+| `GCP_APPLY_SERVICE_ACCOUNT` | Existing bootstrap deployer email, used explicitly for state, schema and Terraform plan/apply |
+| `GCP_RELEASE_PLAN_SERVICE_ACCOUNT` | Existing bootstrap build email matching Terraform `build_service_account`; despite the legacy variable name it only publishes images, with no new state/plan grants |
+| `GCP_BACKEND_HCL` | Exact contents of local `infra/backend.hcl`, dedicated application prefix |
+| `GCP_TFVARS` | Contents of accepted ordinary `infra/terraform.tfvars`, runtime true and current deployed digest, no SQL password |
+
+Preserve the existing provider/service accounts. Bootstrap restricts the repository name/ID, `refs/heads/main` and exact environment subject. Do not rename the GitHub Environment, invent `plan`/`release` environments, broaden WIF or create keys. Configure branch protection and required reviewers, main-only deployments and prevention of self-review where supported; YAML cannot establish those protections. Using the existing broad deployer for plan is an explicit trusted-admin trade-off, not a claim of read-only plan isolation. Both existing identities remain trusted by the same WIF subject.
+
+The **first deployment is local**: cloud workflows require the already-enabled application's outputs and cannot create the registry before building. Subsequent workflows are:
+
+1. **Publish Image Schema And Reviewed Deployment Plan**: dispatch on main. Existing deployer reads outputs; existing build identity publishes a unique commit/run-tagged Linux amd64 image with SBOM/provenance; deployer runs the private schema task. Only success produces a saved runtime-enabled plan for the new digest and the private `deployment-plan` artifact. Attestation generation is not scan/verification.
+2. Review that run's `plan.txt`, binary plan, commit, image digest and schema success privately. Plans, logs and state may be sensitive; do not post them to issues/PR comments. Download only from the verified repository/run. Inspect its `release.auto.tfvars` as the nonsecret accepted image record, not as a new configuration system.
+3. Dispatch **Reviewed Terraform Plan And Manual Apply**, operation `apply`, with that exact successful `plan_run_id`. The run must be from the same repository and main commit, from the infrastructure/release workflow and still have its artifact. If main advanced or the artifact expired, create a new plan/release; do not bypass the check. Review before dispatch/approving the environment.
+4. Apply downloads only that run's `deployment-plan`, checks the binary/backend checksums and applies the saved file without replanning. Terraform additionally rejects stale state. It then waits for MIG stability and HTTP liveness and runs smoke. The backend configuration must remain byte-for-byte identical between plan/apply.
+5. After success, update the image in local `terraform.tfvars` **and** `GCP_TFVARS`, retaining runtime true. Remove any temporary `release.auto.tfvars` after merging its two values if you downloaded it into a working directory. Saved-plan apply uses captured values, not the current repository variable; an unsynchronized later plan must not silently roll the image back.
+
+For infrastructure-only changes, dispatch infrastructure operation `plan`; it requires runtime true in both state and inputs and refuses an image differing from the deployed digest. Review it and dispatch `apply` with its run ID. Image changes must use release/schema or the explicit local schema sequence. No destroy workflow remains.
+
+Both cloud workflows use concurrency group `application-gcp-state` with cancellation disabled, serializing schema/planning/apply runs. GitHub may replace older pending runs; this is not a durable release queue. Another deployment between plan and apply makes the plan stale. Coordinate local operators separately; backend locks do not cover schema or image publishing. Do not use persistent self-hosted runners without separate credential/artifact isolation.
+
+Terraform plan/apply output is kept in private ephemeral runner files, not streamed to logs or uploaded. On failure, review/reproduce privately with the owner rather than enabling shell tracing or publishing raw state/JSON. Only the exact binary plan, readable plan and checksums (plus nonsecret release inputs for release runs) are uploaded for one day; credentials and Terraform data directories are never included. The release job moves deployer credentials outside the Docker build context into the ephemeral runner's private temporary directory; publishing obtains only a short-lived access token and leaves the deployer ADC identity in place for schema and Terraform.
+
+## Costs And Teardown
+
+There is no automated data teardown. SQL deletion protection defaults on and the uploads bucket has Terraform `prevent_destroy`. Full cleanup requires an owner-reviewed backup/retention decision and a saved destroy plan; do not automatically disable protection or purge objects. Keep bootstrap/state/WIF intact until every dependent resource and recovery record is accounted for.
+
+Stopping/removing runtime does not stop SQL, NAT, storage, backup or registry charges. SQL is zonal, not HA; the two-zone API does not provide database failover. Review regional prices, surge, egress, logs, backups and retained object versions. There is no budget alert enforcement, spending cap, automated rollback, restore certification or production readiness claim.

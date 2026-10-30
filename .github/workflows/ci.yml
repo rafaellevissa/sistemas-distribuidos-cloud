@@ -35,13 +35,11 @@ jobs:
           INTEGRATION_DB_USER: root
           INTEGRATION_DB_PASSWORD: ci-disposable-password
       - run: docker build --file apps/api/Dockerfile --tag distributed-cloud-api:ci .
-      - run: npm run platform -- validate --target gcp --environment dev --example
-      - run: npm run platform -- validate --target gcp --environment prod --example
   terraform:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        root: [infra/bootstrap/gcp, infra/stacks/gcp/foundation, infra/stacks/gcp/runtime]
+        root: [infra/bootstrap/gcp, infra]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd

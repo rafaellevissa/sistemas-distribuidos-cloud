@@ -1,97 +1,121 @@
-name: Build Image And Runtime Plan Only
+name: Publish Image Schema And Reviewed Deployment Plan
 on:
   workflow_dispatch:
-    inputs:
-      environment:
-        type: choice
-        options: [dev, prod]
-        default: dev
-        required: true
-      secret_version:
-        description: Existing numeric runtime Secret Manager version (not payload)
-        required: true
-        type: string
 permissions:
   contents: read
 concurrency:
-  group: platform-gcp-${{ inputs.environment }}
+  group: application-gcp-state
   cancel-in-progress: false
 jobs:
-  build-plan:
+  release:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    timeout-minutes: 60
+    environment: ${{ vars.GCP_GITHUB_ENVIRONMENT || 'dev' }}
     permissions:
       contents: read
       id-token: write
+    env:
+      TF_IN_AUTOMATION: 'true'
+      BACKEND_HCL: ${{ vars.GCP_BACKEND_HCL }}
+      TFVARS: ${{ vars.GCP_TFVARS }}
     steps:
+      - name: Require restricted plan storage
+        run: test "$PRIVATE_REPOSITORY" = true
+        env:
+          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24'
+          cache: npm
       - run: npm ci
       - run: npm run lint && npm test
-      - run: npm run platform -- validate --target gcp --environment "$ENVIRONMENT"
-        env:
-          ENVIRONMENT: ${{ inputs.environment }}
-      - name: Check foundation publisher and registry contract before authentication
-        run: |
-          node -e 'const { loadConfig } = require("./platform/cli/src/config"); const config = loadConfig({ target: "gcp", environment: process.env.ENVIRONMENT }); if (config.buildServiceAccount !== process.env.BUILD_SERVICE_ACCOUNT) throw new Error("GCP_RELEASE_PLAN_SERVICE_ACCOUNT must match manifest buildServiceAccount"); if (process.env.ARTIFACT_REPOSITORY !== `distributed-cloud-${config.environment}`) throw new Error("GCP_ARTIFACT_REPOSITORY must match the foundation repository ID");'
-        env:
-          ENVIRONMENT: ${{ inputs.environment }}
-          BUILD_SERVICE_ACCOUNT: ${{ vars.GCP_RELEASE_PLAN_SERVICE_ACCOUNT }}
-          ARTIFACT_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
         with:
           terraform_version: '1.11.4'
           terraform_wrapper: false
-      - id: auth
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_APPLY_SERVICE_ACCOUNT }}
+      - name: Keep deployer credentials outside the Docker build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/deployer-credentials.json"
+          mv "$GOOGLE_GHA_CREDS_PATH" "$destination"
+          chmod 600 "$destination"
+          for variable in GOOGLE_GHA_CREDS_PATH GOOGLE_APPLICATION_CREDENTIALS CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE; do
+            printf '%s=%s\n' "$variable" "$destination" >> "$GITHUB_ENV"
+          done
+      - uses: google-github-actions/setup-gcloud@6189d56e4096ee891640bb02ac264be376592d6a
+      - name: Read the already provisioned application
+        id: deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$BACKEND_HCL" && test -n "$TFVARS"
+          printf '%s\n' "$BACKEND_HCL" > infra/backend.hcl
+          printf '%s\n' "$TFVARS" > infra/terraform.tfvars
+          terraform -chdir=infra init -input=false -lockfile=readonly -backend-config=backend.hcl
+          deployment=$(terraform -chdir=infra output -json deployment)
+          jq -e '.enable_runtime == true' <<< "$deployment" >/dev/null
+          printf 'repository=%s\nhost=%s\n' "$(jq -r '.image_repository' <<< "$deployment")" "$(jq -r '.registry_host' <<< "$deployment")" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        id: publisher
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_RELEASE_PLAN_SERVICE_ACCOUNT }}
           token_format: access_token
-          create_credentials_file: true
-          export_environment_variables: true
-      - id: config
+          create_credentials_file: false
+          export_environment_variables: false
+      - name: Publish Linux amd64 image with provenance and SBOM
+        id: image
+        shell: bash
         run: |
-          node scripts/isolate-credentials.js
-          node scripts/release-config.js
-        env:
-          ENVIRONMENT: ${{ inputs.environment }}
-          ARTIFACT_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
-          SECRET_VERSION: ${{ inputs.secret_version }}
-      - name: Login to regional Artifact Registry
-        run: printf '%s' "$ACCESS_TOKEN" | docker login --username oauth2accesstoken --password-stdin "$REGISTRY"
-        env:
-          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
-          REGISTRY: ${{ steps.config.outputs.registry }}
-      - name: Push commit-tagged image with SBOM and provenance
-        run: |
+          set -euo pipefail
+          printf '%s' "$ACCESS_TOKEN" | docker login --username oauth2accesstoken --password-stdin "$REGISTRY_HOST"
           docker buildx create --use
-          docker buildx build --platform linux/amd64 --push --provenance=mode=max --sbom=true --tag "$IMAGE:$GITHUB_SHA" --metadata-file .platform/build.json --file apps/api/Dockerfile .
+          docker buildx build --platform linux/amd64 --push --provenance=mode=max --sbom=true \
+            --tag "$REPOSITORY:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --metadata-file "$RUNNER_TEMP/build.json" --file apps/api/Dockerfile .
+          digest=$(jq -er '.["containerimage.digest"] | select(test("^sha256:[a-f0-9]{64}$"))' "$RUNNER_TEMP/build.json")
+          printf 'image=%s@%s\n' "$REPOSITORY" "$digest" >> "$GITHUB_OUTPUT"
         env:
-          IMAGE: ${{ steps.config.outputs.image }}
-      - id: descriptor
-        run: node scripts/release-descriptor.js
+          ACCESS_TOKEN: ${{ steps.publisher.outputs.access_token }}
+          REPOSITORY: ${{ steps.deployment.outputs.repository }}
+          REGISTRY_HOST: ${{ steps.deployment.outputs.host }}
+      - name: Apply schema before planning the image update
+        run: bash scripts/apply-schema-gcp.sh "$IMAGE"
         env:
-          ENVIRONMENT: ${{ inputs.environment }}
-          IMAGE: ${{ steps.config.outputs.image }}
-          SECRET_VERSION: ${{ inputs.secret_version }}
-      - name: Create runtime plan (no schema gate or apply)
-        run: npm run platform -- deploy --target gcp --environment "$ENVIRONMENT" --image "$IMAGE" --secret-version "$SECRET_VERSION"
+          IMAGE: ${{ steps.image.outputs.image }}
+      - name: Persist release inputs and save the deployment plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          printf 'enable_runtime = true\nimage = "%s"\n' "$IMAGE" > infra/release.auto.tfvars
+          terraform -chdir=infra plan -input=false -lock-timeout=5m -out=reviewed.tfplan > infra/plan.log 2>&1
+          terraform -chdir=infra show -no-color reviewed.tfplan > infra/plan.txt
+          cd infra
+          sha256sum reviewed.tfplan backend.hcl > checksums.txt
         env:
-          ENVIRONMENT: ${{ inputs.environment }}
-          IMAGE: ${{ steps.descriptor.outputs.image }}
-          SECRET_VERSION: ${{ inputs.secret_version }}
+          IMAGE: ${{ steps.image.outputs.image }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        id: artifact
         with:
-          name: runtime-plan-and-release-descriptor
+          name: deployment-plan
           path: |
-            .platform/release.json
-            .platform/gcp/${{ inputs.environment }}/runtime/reviewed.tfplan
-            .platform/gcp/${{ inputs.environment }}/runtime/plan.json
-            .platform/gcp/${{ inputs.environment }}/runtime/plan.txt
-          include-hidden-files: true
+            infra/reviewed.tfplan
+            infra/plan.txt
+            infra/checksums.txt
+            infra/release.auto.tfvars
           if-no-files-found: error
           retention-days: 1
+      - name: Link private review and record the immutable release
+        run: |
+          printf 'Image `%s`. Schema succeeded. Review the [sensitive plan](%s), commit `%s`, run `%s`. Dispatch infrastructure apply with this run ID. After apply, copy the digest into local terraform.tfvars and GCP_TFVARS, keeping enable_runtime=true.\n' "$IMAGE" "$ARTIFACT_URL" "$GITHUB_SHA" "$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}

@@ -1,0 +1,129 @@
+mock_provider "google" {
+  mock_resource "google_service_account" {
+    defaults = {
+      name  = "projects/example-project/serviceAccounts/mock-account@example-project.iam.gserviceaccount.com"
+      email = "mock-account@example-project.iam.gserviceaccount.com"
+    }
+  }
+  mock_resource "google_compute_network" {
+    defaults = { id = "projects/example-project/global/networks/distributed-cloud" }
+  }
+  mock_resource "google_secret_manager_secret_version" {
+    defaults = { version = "1" }
+  }
+  mock_resource "google_compute_global_address" {
+    defaults = { address = "203.0.113.10" }
+  }
+}
+mock_provider "random" {}
+
+variables {
+  project_id            = "example-project"
+  region                = "us-central1"
+  name                  = "distributed-cloud"
+  zones                 = ["us-central1-a", "us-central1-b"]
+  bucket_name           = "example-project-uploads"
+  build_service_account = "builder@example-project.iam.gserviceaccount.com"
+}
+
+run "initial_infrastructure_without_image" {
+  command = apply
+
+  assert {
+    condition     = length(module.compute) == 0 && length(module.load_balancer) == 0
+    error_message = "The first apply must not launch image-dependent serving resources."
+  }
+  assert {
+    condition     = output.deployment.api_url == null && output.deployment.mig == null && output.deployment.image == ""
+    error_message = "Initial deployment outputs must reflect a disabled runtime."
+  }
+  assert {
+    condition     = output.image_repository == "us-central1-docker.pkg.dev/example-project/distributed-cloud/api"
+    error_message = "The repository must be available before the image is built."
+  }
+  assert {
+    condition     = google_service_account.runtime.account_id != google_service_account.schema.account_id
+    error_message = "Schema tasks and runtime must have distinct Google identities."
+  }
+  assert {
+    condition     = !issensitive(output.deployment) && !can(output.deployment.DB_PASSWORD) && !can(output.deployment.password) && !can(output.deployment.secret_data)
+    error_message = "The deployment contract must not expose SQL credentials."
+  }
+}
+
+run "enable_digest_pinned_runtime" {
+  command = apply
+  variables {
+    enable_runtime = true
+    image          = "us-central1-docker.pkg.dev/example-project/distributed-cloud/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+  assert {
+    condition     = length(module.compute) == 1 && length(module.load_balancer) == 1 && output.api_url == "http://203.0.113.10"
+    error_message = "Enabling the runtime must expose the HTTP IP endpoint."
+  }
+  assert {
+    condition     = output.mig == "distributed-cloud" && output.deployment.runtime_secret_version == "1"
+    error_message = "Scripts require the MIG name and explicit nonsecret credential version."
+  }
+}
+
+run "reject_runtime_without_image" {
+  command = plan
+  variables {
+    enable_runtime = true
+    image          = ""
+  }
+  expect_failures = [var.image]
+}
+
+run "reject_mutable_image" {
+  command = plan
+  variables {
+    image = "us-central1-docker.pkg.dev/example-project/distributed-cloud/api:latest"
+  }
+  expect_failures = [var.image]
+}
+
+run "reject_foreign_repository" {
+  command = plan
+  variables {
+    image = "us-central1-docker.pkg.dev/other-project/distributed-cloud/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+  expect_failures = [var.image]
+}
+
+run "reject_one_zone" {
+  command = plan
+  variables { zones = ["us-central1-a"] }
+  expect_failures = [var.zones]
+}
+
+run "reject_duplicate_zones" {
+  command = plan
+  variables { zones = ["us-central1-a", "us-central1-a"] }
+  expect_failures = [var.zones]
+}
+
+run "reject_foreign_region_zone" {
+  command = plan
+  variables { zones = ["us-central1-a", "us-east1-b"] }
+  expect_failures = [var.zones]
+}
+
+run "reject_single_replica" {
+  command = plan
+  variables { min_replicas = 1 }
+  expect_failures = [var.min_replicas]
+}
+
+run "reject_fractional_replicas" {
+  command = plan
+  variables { min_replicas = 2.5 }
+  expect_failures = [var.min_replicas]
+}
+
+run "reject_inverted_replica_limits" {
+  command = plan
+  variables { max_replicas = 1 }
+  expect_failures = [var.max_replicas]
+}

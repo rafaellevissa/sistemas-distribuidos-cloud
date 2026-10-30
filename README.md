@@ -1,80 +1,63 @@
-# Distributed Cloud Platform
+# Distributed Cloud Demo
 
-A GCP-first infrastructure platform based on the existing AWS teaching API. The application remains JavaScript/Express with the same user CRUD, MySQL schema and image upload contract. The original AWS repository is not modified.
+A JavaScript/Express teaching API deployed with direct Terraform, Docker and Google Cloud tools. One application environment uses one Terraform root: a regional Compute Engine managed instance group across two explicit zones, at least two API replicas, an HTTP load balancer with a public IP, private Cloud SQL MySQL and private Cloud Storage uploads. The AWS reference repository is unchanged; the S3 application adapter does not imply an AWS Terraform deployment.
 
-## Current implementation
+**This is an unauthenticated public HTTP demo. Use disposable, nonsensitive data only.** Anyone reaching the API can modify records or upload files. HTTP is not encrypted. Two API zones do not make the zonal database highly available. SQL, NAT, the load balancer, VMs, disks, backups and storage incur costs even without traffic.
 
-| Area | Available now | Verification boundary |
-| --- | --- | --- |
-| API | Existing CRUD, native S3 and Cloud Storage adapters, configurable provider | HTTP contracts and SDK adapters tested locally |
-| Local environment | Docker Compose with MySQL and S3-compatible MinIO | Compose config validated; Docker daemon required to run |
-| GCP infrastructure | Bootstrap/WIF, private foundation, COS regional MIG, HTTPS load balancer and Cloud Armor | Terraform schemas and mocked plans tested; not deployed |
-| Platform CLI | Config validation, reviewed plans, context-bound apply, status, dev runtime destroy plans | Offline contract tests; requires real inputs and credentials for cloud operations |
-| GitHub Actions | PR CI, protected foundation plan/apply, image build and runtime plan, destroy plan | Not executed in GitHub; configure environments and IAM first |
-| Release automation | Immutable image references, SBOM/provenance and readable plan artifacts | Runtime release is **plan-only**; automated schema gate, scans and rollback remain work |
-
-Only **GCP** is an infrastructure target today. S3 is supported by the application storage adapter; this does not mean AWS Terraform deployment is implemented. Kubernetes, cross-cloud replication and failover are outside this first delivery.
-
-## Repository layout
+## Layout
 
 ```text
-apps/api/                    Existing API and storage adapters
-platform/cli/                Shared configuration and Terraform CLI
-platform/config/             Nonsecret environment schema
-platform/environments/gcp/   Dev template and optional prod example
-platform/providers/gcp/      COS startup script and tests
-infra/bootstrap/gcp/         State bucket, WIF and CI identities
-infra/stacks/gcp/foundation/ Network, SQL, storage, registry and runtime identities
-infra/stacks/gcp/runtime/    Digest-pinned MIG and HTTPS edge
-tests/                      MySQL integration and HTTPS smoke checks
-docs/                       Architecture, onboarding and operations
+apps/api/                 Express API and S3/GCS storage adapters
+infra/                    Single application Terraform root and local tfvars
+infra/modules/            Network, database, storage, compute, load balancer
+infra/bootstrap/gcp/      Existing owner-managed backend/WIF; do not recreate
+scripts/apply-schema-gcp.sh  One-off private schema VM
+tests/                    Integration and explicit HTTP-demo smoke checks
+Makefile                  Thin direct-tool conveniences
+docs/                     English onboarding, architecture and operations
 ```
 
-## Local quick start
+There is no custom deployment CLI, YAML deployment manifest, provider registry or dev/prod application hierarchy. The existing GitHub Environment name is retained only because WIF binds its exact identity subject.
 
-Prerequisites: Node 24 (see `.nvmrc`), npm, and an active Docker Engine with Compose v2. Local passwords in Compose are disposable examples, not cloud credentials. Ports bind to localhost; ensure 3000, 3306, 9000 and 9001 are free.
+## Local API
+
+Use Node 24, npm and an active Docker Engine with Compose v2:
 
 ```sh
 npm ci
 npm run lint
 npm test
 docker compose up --build -d
-docker compose logs -f api
-```
-
-The API is at `http://localhost:3000`. Use `GET /`, `/usuarios` for CRUD, and `POST /upload` with multipart field `imagem` (image MIME, maximum 5 MiB). Upload returns `mensagem`, `url` and `key`; the read URL expires after one hour. MinIO is local S3-compatible storage, not a Cloud Storage emulator.
-
-```sh
 curl http://localhost:3000/
-curl -H 'Content-Type: application/json' -d '{"nome":"Demo","email":"demo@example.test"}' http://localhost:3000/usuarios
-docker compose down
 ```
 
-For the real database integration test against this disposable local database:
+The API exposes `/usuarios` CRUD and `/upload` with multipart field `imagem`. Local storage is S3-compatible MinIO, not a GCS emulator. Compose passwords are disposable local examples, never cloud credentials. With the local database available:
 
 ```sh
 INTEGRATION_DB_HOST=127.0.0.1 INTEGRATION_DB_USER=local_api INTEGRATION_DB_PASSWORD=local-api-disposable npm run test:integration
+docker compose down
 ```
 
-`docker compose down` retains local data. `docker compose down --volumes` irreversibly removes the local database and uploads. Never use these local credentials in a cloud environment.
+`docker compose down` keeps volumes. Adding `--volumes` irreversibly deletes local data.
 
-## GCP onboarding
+## First Cloud Deployment
 
-Start with [the operator guide](docs/onboarding/gcp.md), then review [Terraform contracts and security boundaries](docs/architecture/terraform.md) and [platform operations](docs/operations/platform.md). Create a project with billing, choose a region and control a DNS hostname before provisioning. Documentation and new guides are in English.
+Follow the [GCP onboarding guide](docs/onboarding/gcp.md) for authentication, protected state and real input values. The existing bootstrap is not part of this sequence.
 
-```sh
-npm run platform -- validate --target gcp --environment dev --example
-npm run platform -- validate --target gcp --environment prod --example
-npm run platform -- --help
-```
+1. Configure local `infra/backend.hcl` and `infra/terraform.tfvars` from their examples. Initially set `enable_runtime = false` and `image = ""`.
+2. Run `make init validate plan`, privately inspect `terraform -chdir=infra show reviewed.tfplan`, then explicitly run `make apply`. This creates the registry, network, SQL, generated password, secret and identities, but no serving MIG/LB.
+3. Run `make build TAG=first` and `make push TAG=first`; record the printed immutable image reference.
+4. Run `make db-init IMAGE=REGISTRY/api@sha256:DIGEST` and wait for success. This uses a temporary private VM, not the public GitHub runner as a SQL client.
+5. Edit the same local tfvars: persist that full `image` digest and set `enable_runtime = true`. Run `make plan`, inspect the saved plan, then `make apply`.
+6. Wait for rollout/backend health, then run `make smoke SMOKE_ALLOW_HTTP=true`. See [operations](docs/operations/platform.md) for health commands and repeat releases.
 
-`--example` validates template structure only. Replace the manifest placeholders and commit reviewed configuration before a real plan. Initial bootstrap is an owner operation, not an automatic CLI action. No cloud resources are created by installation or tests.
+Build does not depend on plan or apply. Apply **never** creates a plan and never passes `-auto-approve`; applying a saved Terraform plan itself constitutes approval and has no additional Terraform confirmation prompt. Keep `enable_runtime = true` after first deployment: changing it to false destroys serving resources, not just pauses them.
 
-**Do not apply runtime until the schema has succeeded in an authorized private job.** That automated job/gate is not implemented yet. Foundation creates secret containers, not SQL passwords or users; secure provisioning is an explicit operator prerequisite. Other remaining work includes live GCP acceptance, SQL transport encryption, narrow plan/build IAM, monitoring/budget alerts, image verification and automated rollback. See the architecture guide before enabling the workflows.
+Terraform generates the SQL password and publishes its Secret Manager version. **Passwords remain in Terraform state and saved plans**, even when terminal output is redacted. Restrict backend/artifact readers and keep state, plans, credentials and local tfvars out of Git. Do not print secret payloads.
 
-This is an **unauthenticated public demo**: anyone can modify records and upload files. HTTPS, private infrastructure and WAF do not provide user authorization. Use synthetic data only. The prod profile adds infrastructure safeguards, not certification for real-user production. Cloud SQL, load balancer, NAT, disks and logging can incur recurring costs; no spending cap is implemented.
+## Automation And Limits
 
-## Original educational brief
+[GitHub operations](docs/operations/platform.md#github-actions) describes direct-tool CI, build/schema/plan, and separately dispatched saved-plan apply using existing WIF identities. Cloud workflows require a private repository and the completed local first deployment; ordinary credential-free CI can run publicly. Plans expire after one day. No workflow applies bootstrap or destroys application data.
 
 The original Portuguese brief below records the educational vision, including future goals. It is **not** an implementation or availability guarantee. In particular, multi-region disaster recovery, public permanent image URLs and zero-error chaos experiments are not properties of the current platform.
 

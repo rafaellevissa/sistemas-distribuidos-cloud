@@ -1,38 +1,31 @@
-# Implementation status
+# Verification Status
 
-Last verified: 2026-10-20. This file records the first implementation milestone, not a claim of successful cloud deployment.
+The repository defines a single-root GCP demonstration, not a certified or already accepted live deployment. This document distinguishes available code from evidence still needed; historical CLI test counts and multi-stack milestones no longer describe the current design.
 
-## Completed locally
+## Available Interfaces
 
-- JavaScript API copied from the AWS reference without changing that repository. CRUD contracts and SQL are preserved.
-- Native S3 and Cloud Storage adapters selected through environment configuration. HTTP and SDK contract tests cover uploads, errors and signed URL TTL.
-- npm workspaces and lockfile, nonroot Node 24 image definition, local MySQL/MinIO Compose, integration and HTTPS smoke checks.
-- JSON Schema validated nonsecret manifests; strict CLI input handling, saved Terraform plans tied to commit/config/backend/content, explicit confirmations and constrained destruction.
-- GCP Terraform roots for owner bootstrap/WIF/state, private foundation and digest-pinned COS MIG/HTTPS runtime. Provider lockfiles are included.
-- Credential-free PR CI and manually triggered, protected OIDC workflow definitions. Foundation apply consumes the saved same-run plan. Runtime release and destruction workflows publish plans only.
-- English onboarding and operations documentation; the original educational brief remains in the README as historical context.
+- Direct Terraform application root with five modules, two explicit API zones, minimum two replicas, public HTTP IP, private zonal SQL and private GCS.
+- Terraform-generated SQL password/user and Secret Manager version, with the accepted password-in-state/plan trade-off.
+- One-off private schema VM script and thin Make targets for Terraform, build/push, schema and smoke.
+- Manual existing-WIF workflows: build/schema/saved plan, then separately dispatched reviewed artifact apply and health/smoke. First deployment remains local; cloud plan artifacts require a private repository.
+- Local Compose API/MySQL/MinIO development and credential-free CI including integration tests and Docker build.
 
-## Executed checks
+## Verification Boundaries
 
-- `npm test`: 41 passing tests, including API, storage, CLI, workflows, COS credential bootstrap and smoke-test logic.
-- `npm run lint`: JavaScript syntax validation passed; this is not semantic linting.
-- `npm audit`: zero reported vulnerabilities after dependency updates.
-- Dev and prod example manifests: structural validation passed. Placeholders are intentionally rejected for cloud operations.
-- `docker compose config --quiet`: passed.
-- `terraform fmt -check -recursive infra`: passed.
-- `terraform init -backend=false -input=false -lockfile=readonly` and `terraform validate`: passed in all three roots against Google provider 7.46.1.
-- `terraform test`: 12 mocked plan tests passed across the three roots. No real resources were created.
-- Editor diagnostics: no errors at verification time.
+Make dry runs, YAML parsing, embedded Bash syntax and reference/contract checks validate automation structure without creating cloud resources. Terraform validation/mock tests and script unit tests can establish local invariants, not actual IAM, quota, network reachability, SQL connectivity, image pulls, rollout availability or signing behavior. Consult actual test output for the current counts; do not infer a live deployment from a green unit test.
 
-Local Node was 22.23.0; CI and Docker select Node 24. Container build and runtime checks remain outstanding because the local Docker daemon was unavailable. The real MySQL integration test was explicitly skipped without `INTEGRATION_DB_HOST`. CI is configured to run it using a disposable MySQL service, but the workflow has not been executed in GitHub.
+Local verification passed: 39 JavaScript tests cover the API, startup credentials, temporary schema task lifecycle and smoke contracts; 16 Terraform mock tests cover the root and modules. JavaScript syntax lint, Terraform validation/formatting and whitespace checks passed. The bootstrap has no changes. The MySQL integration test was skipped because no disposable database was configured; the Docker executable points to an unavailable installation, so the image build was not run.
 
-## Next implementation gates
+The smoke runner verifies both default HTTPS and explicitly opted-in HTTP CRUD/upload flows using simulated requests. Make and workflows pass `SMOKE_ALLOW_HTTP=true` for the HTTP demo; signed GCS reads still require HTTPS. These local contracts do not establish live GCP acceptance.
 
-1. Start Docker and verify the workspace image, local CRUD and upload/download against MinIO, then execute the real MySQL integration suite.
-2. Supply reviewed project/billing/region/domain/repository identifiers, bootstrap with an authorized owner and migrate state. Complete plan/build identity permissions and GitHub environment protections before enabling cloud workflows.
-3. Add a reproducible private SQL-user/secret provisioning flow and one-off schema job. Integrate schema success as a mandatory runtime release gate; do not bypass this prerequisite through manual apply.
-4. Add image vulnerability/attestation verification, bounded rollout and HTTPS smoke gates, and tested rollback automation. Runtime release must remain plan-only until those controls exist.
-5. Prove native GCP credentials and signed URL downloads, private networking, TLS/certificate readiness, denied unauthorized access, rollout convergence and a no-change follow-up plan in a real disposable project.
-6. Add SQL transport encryption, monitoring/budget alerts, connection-capacity limits, backup restoration and controlled HA/chaos exercises. Review the broad trusted infrastructure IAM boundary before production activation.
+Cloud apply, image build/publish and GitHub workflow execution are not performed as part of documentation/automation editing. Container/integration checks require a running Docker/MySQL environment. Do not report them as passed when only syntax or mocked checks ran.
 
-The first milestone does not implement full AWS Terraform, cross-cloud data replication/failover, real-user authorization or production certification. Public deployments must use disposable demo data only. Cost alerts and a spending cap are not implemented.
+## Live Acceptance Still Required
+
+1. Owner confirms existing bootstrap state location, exact WIF environment subject and unchanged identities; configures protected GitHub access and approves costs/quotas.
+2. Run the [local first-deployment sequence](../onboarding/gcp.md): base plan/apply, image push/digest, successful private schema/cleanup, runtime-enabled reviewed plan/apply.
+3. Prove healthy API instances in both zones, LB health, CRUD, upload and HTTPS signed-object read, denied anonymous bucket access and no public SQL/VM addresses. Check a no-change follow-up plan with persisted inputs.
+4. Exercise a compatible rolling release and deliberate rollback, schema failure blocking a plan, orphan cleanup and backup restore under explicit owner authorization.
+5. Before any sensitive use, separately design authentication/authorization, frontend and SQL TLS, database HA, narrow IAM/SQL grants, monitoring, budget alerts, image verification and tested recovery. None is implied by two API zones.
+
+This setup has no domain/HTTPS frontend, database HA, multi-region disaster recovery, automatic rollback or spending cap. Use disposable nonsensitive data only; ongoing infrastructure charges are expected.
