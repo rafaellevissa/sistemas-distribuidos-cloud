@@ -1,0 +1,9 @@
+variable "name" { type = string }
+variable "project_id" { type = string }
+variable "region" { type = string }
+variable "bucket_name" { type = string }
+variable "labels" { type = map(string) }
+variable "runtime_service_account" { type = string }
+variable "runtime_identity" { type = string }
+variable "schema_service_account" { type = string }
+variable "build_service_account" { type = string }

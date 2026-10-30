@@ -1,0 +1,72 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: local-root-disposable
+      MYSQL_DATABASE: aula_pratica_db
+      MYSQL_USER: local_api
+      MYSQL_PASSWORD: local-api-disposable
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysql -h 127.0.0.1 -u$$MYSQL_USER -D aula_pratica_db -e 'SELECT 1'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: local-minio
+      MINIO_ROOT_PASSWORD: local-minio-disposable
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-data:/data
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        attempts=0
+        until mc alias set local http://minio:9000 local-minio local-minio-disposable && mc mb --ignore-existing local/local-uploads; do
+          attempts=$$((attempts + 1))
+          [ "$$attempts" -lt 30 ] || exit 1
+          sleep 2
+        done
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    command: ["npm", "start", "--workspace=@distributed-cloud/api"]
+    working_dir: /workspace
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      PORT: "3000"
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: local_api
+      DB_PASSWORD: local-api-disposable
+      DB_NAME: aula_pratica_db
+      STORAGE_PROVIDER: aws
+      STORAGE_BUCKET: local-uploads
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local-minio
+      AWS_SECRET_ACCESS_KEY: local-minio-disposable
+      S3_ENDPOINT: http://localhost:9000
+      S3_FORCE_PATH_STYLE: "true"
+    network_mode: service:minio
+volumes:
+  mysql-data:
+  minio-data:

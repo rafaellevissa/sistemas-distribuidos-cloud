@@ -1,0 +1,59 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+systemctl start docker
+install -d -m 700 /run/cloud-api /var/lib/cloud-api-docker
+export DOCKER_CONFIG=/var/lib/cloud-api-docker
+IMAGE='${image}'
+REGISTRY='${registry_host}'
+
+for attempt in $(seq 1 12); do
+  if curl --fail --silent --show-error --retry 3 --connect-timeout 5 --max-time 30 \
+    -H 'Metadata-Flavor: Google' \
+    http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
+    | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | docker login -u oauth2accesstoken --password-stdin "https://$REGISTRY" >/dev/null 2>&1 \
+    && docker pull "$IMAGE" >/dev/null 2>&1; then
+    break
+  fi
+  if [ "$attempt" -eq 12 ]; then exit 1; fi
+  sleep 10
+done
+rm -f "$DOCKER_CONFIG/config.json"
+
+for attempt in $(seq 1 12); do
+  if docker run --rm --network host --entrypoint node "$IMAGE" --input-type=module -e '
+    const metadata = "http://metadata.google.internal/computeMetadata/v1/";
+    async function get(url, headers) {
+      const result = await fetch(url, {headers, signal: AbortSignal.timeout(15000)});
+      if (!result.ok) throw new Error("Bootstrap request failed: " + result.status);
+      return result;
+    }
+    try {
+      const {access_token} = await (await get(metadata + "instance/service-accounts/default/token", {"Metadata-Flavor":"Google"})).json();
+      const secret = await (await get("https://secretmanager.googleapis.com/v1/projects/${project_id}/secrets/${secret_id}/versions/${secret_version}:access", {Authorization: "Bearer " + access_token})).json();
+      const payload = JSON.parse(Buffer.from(secret.payload.data, "base64").toString("utf8"));
+      for (const key of ["DB_USER", "DB_PASSWORD"]) {
+        if (typeof payload[key] !== "string" || !payload[key].length || /[\r\n\x00]/.test(payload[key])) throw new Error("Invalid credential format");
+      }
+      const instance = await (await get(metadata + "instance/id", {"Metadata-Flavor":"Google"})).text();
+      console.log("DB_USER=" + payload.DB_USER + "\nDB_PASSWORD=" + payload.DB_PASSWORD + "\nINSTANCE_ID=" + instance);
+    } catch {
+      console.error("Runtime credential initialization failed");
+      process.exit(1);
+    }
+  ' > /run/cloud-api/env.new; then
+    break
+  fi
+  rm -f /run/cloud-api/env.new
+  if [ "$attempt" -eq 12 ]; then exit 1; fi
+  sleep 10
+done
+printf '%s\n' 'CLOUD_PROVIDER=gcp' 'STORAGE_PROVIDER=gcp' 'STORAGE_BUCKET=${bucket}' \
+  'DB_HOST=${db_host}' 'DB_NAME=${db_name}' 'PORT=3000' 'NODE_ENV=production' >> /run/cloud-api/env.new
+chmod 600 /run/cloud-api/env.new
+mv /run/cloud-api/env.new /run/cloud-api/env
+docker rm -f cloud-api >/dev/null 2>&1 || true
+docker run -d --name cloud-api --network host --restart always \
+  --log-driver gcplogs --log-opt gcp-project='${project_id}' \
+  --env-file /run/cloud-api/env --entrypoint node "$IMAGE" src/server.js >/dev/null

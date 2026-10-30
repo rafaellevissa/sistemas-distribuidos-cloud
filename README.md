@@ -1,4 +1,66 @@
-# sistemas-distribuidos-cloud
+# Distributed Cloud Demo
+
+A JavaScript/Express teaching API deployed with direct Terraform, Docker and Google Cloud tools. One application environment uses one Terraform root: a regional Compute Engine managed instance group across two explicit zones, at least two API replicas, an HTTP load balancer with a public IP, private Cloud SQL MySQL and private Cloud Storage uploads. The AWS reference repository is unchanged; the S3 application adapter does not imply an AWS Terraform deployment.
+
+**This is an unauthenticated public HTTP demo. Use disposable, nonsensitive data only.** Anyone reaching the API can modify records or upload files. HTTP is not encrypted. Two API zones do not make the zonal database highly available. SQL, NAT, the load balancer, VMs, disks, backups and storage incur costs even without traffic.
+
+## Layout
+
+```text
+apps/api/                 Express API and S3/GCS storage adapters
+infra/                    Single application Terraform root and local tfvars
+infra/modules/            Network, database, storage, compute, load balancer
+infra/bootstrap/gcp/      Existing owner-managed backend/WIF; do not recreate
+scripts/apply-schema-gcp.sh  One-off private schema VM
+tests/                    Integration and explicit HTTP-demo smoke checks
+Makefile                  Thin direct-tool conveniences
+docs/                     English onboarding, architecture and operations
+```
+
+There is no custom deployment CLI, YAML deployment manifest, provider registry or dev/prod application hierarchy. The existing GitHub Environment name is retained only because WIF binds its exact identity subject.
+
+## Local API
+
+Use Node 24, npm and an active Docker Engine with Compose v2:
+
+```sh
+npm ci
+npm run lint
+npm test
+docker compose up --build -d
+curl http://localhost:3000/
+```
+
+The API exposes `/usuarios` CRUD and `/upload` with multipart field `imagem`. Local storage is S3-compatible MinIO, not a GCS emulator. Compose passwords are disposable local examples, never cloud credentials. With the local database available:
+
+```sh
+INTEGRATION_DB_HOST=127.0.0.1 INTEGRATION_DB_USER=local_api INTEGRATION_DB_PASSWORD=local-api-disposable npm run test:integration
+docker compose down
+```
+
+`docker compose down` keeps volumes. Adding `--volumes` irreversibly deletes local data.
+
+## First Cloud Deployment
+
+Follow the [GCP onboarding guide](docs/onboarding/gcp.md) for authentication, protected state and real input values. The existing bootstrap is not part of this sequence.
+
+1. Configure local `infra/backend.hcl` and `infra/terraform.tfvars` from their examples. Initially set `enable_runtime = false` and `image = ""`.
+2. Run `make init validate plan`, privately inspect `terraform -chdir=infra show reviewed.tfplan`, then explicitly run `make apply`. This creates the registry, network, SQL, generated password, secret and identities, but no serving MIG/LB.
+3. Run `make build TAG=first` and `make push TAG=first`; record the printed immutable image reference.
+4. Run `make db-init IMAGE=REGISTRY/api@sha256:DIGEST` and wait for success. This uses a temporary private VM, not the public GitHub runner as a SQL client.
+5. Edit the same local tfvars: persist that full `image` digest and set `enable_runtime = true`. Run `make plan`, inspect the saved plan, then `make apply`.
+6. Wait for rollout/backend health, then run `make smoke SMOKE_ALLOW_HTTP=true`. See [operations](docs/operations/platform.md) for health commands and repeat releases.
+
+Build does not depend on plan or apply. Apply **never** creates a plan and never passes `-auto-approve`; applying a saved Terraform plan itself constitutes approval and has no additional Terraform confirmation prompt. Keep `enable_runtime = true` after first deployment: changing it to false destroys serving resources, not just pauses them.
+
+Terraform generates the SQL password and publishes its Secret Manager version. **Passwords remain in Terraform state and saved plans**, even when terminal output is redacted. Restrict backend/artifact readers and keep state, plans, credentials and local tfvars out of Git. Do not print secret payloads.
+
+## Automation And Limits
+
+[GitHub operations](docs/operations/platform.md#github-actions) describes direct-tool CI, build/schema/plan, and separately dispatched saved-plan apply using existing WIF identities. Cloud workflows require a private repository and the completed local first deployment; ordinary credential-free CI can run publicly. Plans expire after one day. No workflow applies bootstrap or destroys application data.
+
+The original Portuguese brief below records the educational vision, including future goals. It is **not** an implementation or availability guarantee. In particular, multi-region disaster recovery, public permanent image URLs and zero-error chaos experiments are not properties of the current platform.
+
 Projeto de engenharia do caos em cima de sistemas distribuídos, uma abordagem pedagógica. Uso de computação em nuvem, iac, Devops, CI/CD, pipelines, docker, containerização, gestão de secrets, disaster recovery, DNS, multi-AZ, multicloud, tolerância a falhas, transparências de Tanenbaum, escalabilidade, Openness, Confiabilidade, Load Balancer.
 
 **Infraestrutura para Sistemas Distribuídos e Engenharia do Caos: Uma Abordagem Pedagógica e Prática**

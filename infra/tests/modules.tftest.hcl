@@ -1,0 +1,140 @@
+mock_provider "google" {}
+mock_provider "random" {
+  mock_resource "random_password" {
+    defaults = { result = "mock-password-not-a-real-credential" }
+  }
+}
+
+run "private_network" {
+  command = plan
+  module { source = "./modules/network" }
+  variables {
+    name   = "distributed-cloud"
+    region = "us-central1"
+  }
+  assert {
+    condition     = !google_compute_network.app.auto_create_subnetworks && google_compute_subnetwork.app.private_ip_google_access
+    error_message = "The application subnet must use private Google access on a custom VPC."
+  }
+  assert {
+    condition     = toset(google_compute_firewall.gfe.source_ranges) == toset(["35.191.0.0/16", "130.211.0.0/22"]) && toset(one(google_compute_firewall.gfe.allow).ports) == toset(["3000"])
+    error_message = "Only GFE/health-check ranges may reach the API port."
+  }
+}
+
+run "private_database_and_shared_sql_identity" {
+  command = apply
+  module { source = "./modules/database" }
+  variables {
+    name                    = "distributed-cloud"
+    region                  = "us-central1"
+    network                 = "projects/example-project/global/networks/distributed-cloud"
+    db_tier                 = "db-f1-micro"
+    deletion_protection     = true
+    labels                  = {}
+    runtime_service_account = "runtime@example-project.iam.gserviceaccount.com"
+    schema_service_account  = "schema@example-project.iam.gserviceaccount.com"
+  }
+  assert {
+    condition     = !google_sql_database_instance.app.settings[0].ip_configuration[0].ipv4_enabled && length(google_sql_database_instance.app.settings[0].ip_configuration[0].authorized_networks) == 0
+    error_message = "Cloud SQL must have no public IP or public authorized networks."
+  }
+  assert {
+    condition     = google_sql_database_instance.app.deletion_protection && google_sql_database_instance.app.settings[0].backup_configuration[0].enabled && google_sql_database_instance.app.settings[0].availability_type == "ZONAL"
+    error_message = "SQL must retain deletion protection and backups; this demo does not promise regional SQL HA."
+  }
+  assert {
+    condition     = sensitive(jsondecode(google_secret_manager_secret_version.runtime.secret_data).DB_PASSWORD) == random_password.app.result && jsondecode(google_secret_manager_secret_version.runtime.secret_data).DB_USER == google_sql_user.app.name
+    error_message = "The secret must contain the Terraform-generated SQL user credentials."
+  }
+  assert {
+    condition     = length(google_secret_manager_secret_iam_member.access) == 2 && google_secret_manager_secret_iam_member.access["schema"].member != google_secret_manager_secret_iam_member.access["runtime"].member
+    error_message = "Both distinct Google identities need access to the shared SQL credential, not separate SQL grants."
+  }
+}
+
+run "private_storage_and_signing" {
+  command = plan
+  module { source = "./modules/storage" }
+  variables {
+    name                    = "distributed-cloud"
+    project_id              = "example-project"
+    region                  = "us-central1"
+    bucket_name             = "example-project-uploads"
+    labels                  = {}
+    runtime_service_account = "runtime@example-project.iam.gserviceaccount.com"
+    runtime_identity        = "projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com"
+    schema_service_account  = "schema@example-project.iam.gserviceaccount.com"
+    build_service_account   = "builder@example-project.iam.gserviceaccount.com"
+  }
+  assert {
+    condition     = google_storage_bucket.uploads.public_access_prevention == "enforced" && google_storage_bucket.uploads.uniform_bucket_level_access && !google_storage_bucket.uploads.force_destroy
+    error_message = "Uploads must remain private and protected from force deletion."
+  }
+  assert {
+    condition     = toset(google_project_iam_custom_role.sign_blob.permissions) == toset(["iam.serviceAccounts.signBlob"]) && google_service_account_iam_member.sign_blob.member == "serviceAccount:runtime@example-project.iam.gserviceaccount.com"
+    error_message = "Private signed URLs require runtime self-signing with only signBlob."
+  }
+  assert {
+    condition     = length(google_artifact_registry_repository_iam_member.reader) == 2 && google_artifact_registry_repository_iam_member.builder.role == "roles/artifactregistry.writer"
+    error_message = "Schema/runtime must pull images while only the existing builder gets repository write access."
+  }
+}
+
+run "private_two_zone_compute" {
+  command = plan
+  module { source = "./modules/compute" }
+  variables {
+    name                    = "distributed-cloud"
+    project_id              = "example-project"
+    region                  = "us-central1"
+    zones                   = ["us-central1-a", "us-central1-b"]
+    subnetwork              = "projects/example-project/regions/us-central1/subnetworks/distributed-cloud"
+    runtime_service_account = "runtime@example-project.iam.gserviceaccount.com"
+    runtime_secret_id       = "distributed-cloud-runtime"
+    runtime_secret_version  = "1"
+    db_host                 = "10.43.0.3"
+    db_name                 = "aula_pratica_db"
+    bucket                  = "example-project-uploads"
+    registry_host           = "us-central1-docker.pkg.dev"
+    image                   = "us-central1-docker.pkg.dev/example-project/distributed-cloud/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    machine_type            = "e2-small"
+    min_replicas            = 2
+    max_replicas            = 4
+    labels                  = {}
+  }
+  assert {
+    condition     = toset(google_compute_region_instance_group_manager.api.distribution_policy_zones) == toset(["us-central1-a", "us-central1-b"]) && google_compute_region_instance_group_manager.api.distribution_policy_target_shape == "EVEN"
+    error_message = "The regional MIG must explicitly distribute across the selected two zones."
+  }
+  assert {
+    condition     = google_compute_region_instance_group_manager.api.update_policy[0].max_surge_fixed == 2 && google_compute_region_instance_group_manager.api.update_policy[0].max_unavailable_fixed == 0 && google_compute_region_autoscaler.api.autoscaling_policy[0].min_replicas == 2
+    error_message = "Maintain at least two replicas, with two surge instances and no planned unavailability."
+  }
+  assert {
+    condition     = length(google_compute_instance_template.api.network_interface[0].access_config) == 0
+    error_message = "Runtime instances must not have public IPs."
+  }
+  assert {
+    condition     = strcontains(google_compute_instance_template.api.metadata["startup-script"], "versions/1:access") && !strcontains(google_compute_instance_template.api.metadata["startup-script"], "mock-password")
+    error_message = "VM metadata may contain a secret version reference, never its credential value."
+  }
+}
+
+run "http_ip_load_balancer" {
+  command = plan
+  module { source = "./modules/load_balancer" }
+  variables {
+    name           = "distributed-cloud"
+    instance_group = "projects/example-project/regions/us-central1/instanceGroups/distributed-cloud"
+    health_check   = "projects/example-project/global/healthChecks/distributed-cloud"
+  }
+  assert {
+    condition     = google_compute_global_forwarding_rule.http.port_range == "80" && google_compute_global_forwarding_rule.http.load_balancing_scheme == "EXTERNAL_MANAGED" && google_compute_backend_service.api.protocol == "HTTP"
+    error_message = "The initial demo endpoint must use HTTP on port 80."
+  }
+  assert {
+    condition     = google_compute_backend_service.api.security_policy == null
+    error_message = "No WAF is required for this initial demo."
+  }
+}
