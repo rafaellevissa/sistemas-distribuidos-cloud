@@ -1,4 +1,4 @@
-name: Publish Image Schema And Reviewed Deployment Plan
+name: Publish API And Plan Deployment
 on:
   workflow_dispatch:
 permissions:
@@ -50,7 +50,7 @@ jobs:
             printf '%s=%s\n' "$variable" "$destination" >> "$GITHUB_ENV"
           done
       - uses: google-github-actions/setup-gcloud@6189d56e4096ee891640bb02ac264be376592d6a
-      - name: Read the already provisioned application
+      - name: Read the provisioned base infrastructure
         id: deployment
         shell: bash
         run: |
@@ -61,13 +61,13 @@ jobs:
           printf '%s\n' "$TFVARS" > infra/terraform.tfvars
           terraform -chdir=infra init -input=false -lockfile=readonly -backend-config=backend.hcl
           deployment=$(terraform -chdir=infra output -json deployment)
-          jq -e '.enable_runtime == true' <<< "$deployment" >/dev/null
+          jq -e '(.image_repository | type == "string" and length > 0) and (.registry_host | type == "string" and length > 0) and (.schema_service_account | type == "string" and length > 0)' <<< "$deployment" >/dev/null
           printf 'repository=%s\nhost=%s\n' "$(jq -r '.image_repository' <<< "$deployment")" "$(jq -r '.registry_host' <<< "$deployment")" >> "$GITHUB_OUTPUT"
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
         id: publisher
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_RELEASE_PLAN_SERVICE_ACCOUNT }}
+          service_account: ${{ vars.GCP_BUILD_SERVICE_ACCOUNT || vars.GCP_RELEASE_PLAN_SERVICE_ACCOUNT }}
           token_format: access_token
           create_credentials_file: false
           export_environment_variables: false
