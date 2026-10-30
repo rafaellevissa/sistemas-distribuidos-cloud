@@ -17,6 +17,12 @@ mock_provider "google" {
 }
 mock_provider "random" {}
 
+override_resource {
+  override_during = plan
+  target          = module.database.google_secret_manager_secret_version.runtime
+  values          = { version = "1" }
+}
+
 variables {
   project_id            = "example-project"
   region                = "us-central1"
@@ -24,10 +30,12 @@ variables {
   zones                 = ["us-central1-a", "us-central1-b"]
   bucket_name           = "example-project-uploads"
   build_service_account = "builder@example-project.iam.gserviceaccount.com"
+  enable_runtime        = false
+  image                 = ""
 }
 
 run "initial_infrastructure_without_image" {
-  command = apply
+  command = plan
 
   assert {
     condition     = length(module.compute) == 0 && length(module.load_balancer) == 0
@@ -52,7 +60,12 @@ run "initial_infrastructure_without_image" {
 }
 
 run "enable_digest_pinned_runtime" {
-  command = apply
+  command = plan
+  override_resource {
+    override_during = plan
+    target          = module.load_balancer[0].google_compute_global_address.api
+    values          = { address = "203.0.113.10" }
+  }
   variables {
     enable_runtime = true
     image          = "us-central1-docker.pkg.dev/example-project/distributed-cloud/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
