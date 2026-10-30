@@ -1,6 +1,11 @@
-name: Publish API And Plan Deployment
+name: Publish And Deploy API
 on:
   workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DEPLOY TO PROD to authorize build, schema, plan and apply
+        type: string
+        required: true
 permissions:
   contents: read
 concurrency:
@@ -8,10 +13,10 @@ concurrency:
   cancel-in-progress: false
 jobs:
   release:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY TO PROD'
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    environment: ${{ vars.GCP_GITHUB_ENVIRONMENT || 'dev' }}
+    environment: ${{ vars.GCP_GITHUB_ENVIRONMENT || 'prod' }}
     permissions:
       contents: read
       id-token: write
@@ -20,10 +25,12 @@ jobs:
       BACKEND_HCL: ${{ vars.GCP_BACKEND_HCL }}
       TFVARS: ${{ vars.GCP_TFVARS }}
     steps:
-      - name: Require restricted plan storage
-        run: test "$PRIVATE_REPOSITORY" = true
-        env:
-          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
+      - name: Prepare private runner files
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/gcp-deployment"
+          printf 'DOCKER_CONFIG=%s/docker\nCLOUDSDK_CONFIG=%s/gcloud\n' "$RUNNER_TEMP/gcp-deployment" "$RUNNER_TEMP/gcp-deployment" >> "$GITHUB_ENV"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -36,14 +43,16 @@ jobs:
           terraform_version: '1.11.4'
           terraform_wrapper: false
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        id: deployer
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_APPLY_SERVICE_ACCOUNT }}
+          cleanup_credentials: true
       - name: Keep deployer credentials outside the Docker build context
         shell: bash
         run: |
           set -euo pipefail
-          destination="$RUNNER_TEMP/deployer-credentials.json"
+          destination="$RUNNER_TEMP/gcp-deployment/deployer-credentials.json"
           mv "$GOOGLE_GHA_CREDS_PATH" "$destination"
           chmod 600 "$destination"
           for variable in GOOGLE_GHA_CREDS_PATH GOOGLE_APPLICATION_CREDENTIALS CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE; do
@@ -56,13 +65,16 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          test -n "$BACKEND_HCL" && test -n "$TFVARS"
+          {
+          test -n "$BACKEND_HCL"
+          test -n "$TFVARS"
           printf '%s\n' "$BACKEND_HCL" > infra/backend.hcl
           printf '%s\n' "$TFVARS" > infra/terraform.tfvars
           terraform -chdir=infra init -input=false -lockfile=readonly -backend-config=backend.hcl
           deployment=$(terraform -chdir=infra output -json deployment)
           jq -e '(.image_repository | type == "string" and length > 0) and (.registry_host | type == "string" and length > 0) and (.schema_service_account | type == "string" and length > 0)' <<< "$deployment" >/dev/null
           printf 'repository=%s\nhost=%s\n' "$(jq -r '.image_repository' <<< "$deployment")" "$(jq -r '.registry_host' <<< "$deployment")" >> "$GITHUB_OUTPUT"
+          } > "$RUNNER_TEMP/gcp-deployment/init.log" 2>&1
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
         id: publisher
         with:
@@ -76,18 +88,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
+          {
           printf '%s' "$ACCESS_TOKEN" | docker login --username oauth2accesstoken --password-stdin "$REGISTRY_HOST"
           docker buildx create --use
           docker buildx build --platform linux/amd64 --push --provenance=mode=max --sbom=true \
-            --tag "$REPOSITORY:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --metadata-file "$RUNNER_TEMP/build.json" --file apps/api/Dockerfile .
-          digest=$(jq -er '.["containerimage.digest"] | select(test("^sha256:[a-f0-9]{64}$"))' "$RUNNER_TEMP/build.json")
+            --tag "$REPOSITORY:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --metadata-file "$RUNNER_TEMP/gcp-deployment/build.json" --file apps/api/Dockerfile .
+          digest=$(jq -er '.["containerimage.digest"] | select(test("^sha256:[a-f0-9]{64}$"))' "$RUNNER_TEMP/gcp-deployment/build.json")
           printf 'image=%s@%s\n' "$REPOSITORY" "$digest" >> "$GITHUB_OUTPUT"
+          } > "$RUNNER_TEMP/gcp-deployment/build.log" 2>&1
         env:
           ACCESS_TOKEN: ${{ steps.publisher.outputs.access_token }}
           REPOSITORY: ${{ steps.deployment.outputs.repository }}
           REGISTRY_HOST: ${{ steps.deployment.outputs.host }}
       - name: Apply schema before planning the image update
-        run: bash scripts/apply-schema-gcp.sh "$IMAGE"
+        run: |
+          umask 077
+          bash scripts/apply-schema-gcp.sh "$IMAGE" > "$RUNNER_TEMP/gcp-deployment/schema.log" 2>&1 || { printf 'Schema operation failed.\n' >&2; exit 1; }
         env:
           IMAGE: ${{ steps.image.outputs.image }}
       - name: Persist release inputs and save the deployment plan
@@ -96,26 +113,40 @@ jobs:
           set -euo pipefail
           umask 077
           printf 'enable_runtime = true\nimage = "%s"\n' "$IMAGE" > infra/release.auto.tfvars
-          terraform -chdir=infra plan -input=false -lock-timeout=5m -out=reviewed.tfplan > infra/plan.log 2>&1
-          terraform -chdir=infra show -no-color reviewed.tfplan > infra/plan.txt
-          cd infra
-          sha256sum reviewed.tfplan backend.hcl > checksums.txt
+          terraform -chdir=infra plan -input=false -lock-timeout=5m -out="$RUNNER_TEMP/gcp-deployment/deployment.tfplan" > "$RUNNER_TEMP/gcp-deployment/plan.stdout.log" 2> "$RUNNER_TEMP/gcp-deployment/plan.stderr.log" || { printf 'Terraform plan failed.\n' >&2; exit 1; }
         env:
           IMAGE: ${{ steps.image.outputs.image }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        id: artifact
-        with:
-          name: deployment-plan
-          path: |
-            infra/reviewed.tfplan
-            infra/plan.txt
-            infra/checksums.txt
-            infra/release.auto.tfvars
-          if-no-files-found: error
-          retention-days: 1
-      - name: Link private review and record the immutable release
+      - name: Apply the exact plan in this runner
+        shell: bash
         run: |
-          printf 'Image `%s`. Schema succeeded. Review the [sensitive plan](%s), commit `%s`, run `%s`. Dispatch infrastructure apply with this run ID. After apply, copy the digest into local terraform.tfvars and GCP_TFVARS, keeping enable_runtime=true.\n' "$IMAGE" "$ARTIFACT_URL" "$GITHUB_SHA" "$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          umask 077
+          terraform -chdir=infra apply -input=false -lock-timeout=5m "$RUNNER_TEMP/gcp-deployment/deployment.tfplan" > "$RUNNER_TEMP/gcp-deployment/apply.stdout.log" 2> "$RUNNER_TEMP/gcp-deployment/apply.stderr.log" || { printf 'Terraform apply failed.\n' >&2; exit 1; }
+      - name: Wait for the MIG and HTTP endpoint, then smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          {
+          deployment=$(terraform -chdir=infra output -json deployment)
+          gcloud compute instance-groups managed wait-until "$(jq -er '.mig' <<< "$deployment")" --stable \
+            --project="$(jq -er '.project_id' <<< "$deployment")" --region="$(jq -er '.region' <<< "$deployment")" --timeout=900
+          url=$(jq -er '.api_url' <<< "$deployment")
+          curl --fail --silent --show-error --retry 30 --retry-all-errors --retry-delay 10 --max-time 10 "$url" >/dev/null
+          SMOKE_ALLOW_HTTP=true node tests/smoke/api.js "$url"
+          } > "$RUNNER_TEMP/gcp-deployment/health.log" 2>&1
+      - name: Record the immutable release
+        run: printf 'Deployed image `%s`. Synchronize local terraform.tfvars and GCP_TFVARS with this digest and enable_runtime=true.\n' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
         env:
           IMAGE: ${{ steps.image.outputs.image }}
-          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+      - name: Remove private deployment files
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf -- "$RUNNER_TEMP/gcp-deployment" infra/.terraform
+          rm -f -- infra/backend.hcl infra/terraform.tfvars infra/release.auto.tfvars
+          rm -f -- infra/errored.tfstate infra/crash.log infra/crash.*.log
+          if [[ -n "$ORIGINAL_CREDENTIALS" ]]; then rm -f -- "$ORIGINAL_CREDENTIALS"; fi
+        env:
+          ORIGINAL_CREDENTIALS: ${{ steps.deployer.outputs.credentials_file_path }}

@@ -1,16 +1,11 @@
-name: Reviewed Terraform Plan And Manual Apply
+name: Deploy Infrastructure With Current Image
 on:
   workflow_dispatch:
     inputs:
-      operation:
-        type: choice
-        options: [plan, apply]
-        default: plan
-        required: true
-      plan_run_id:
-        description: Successful infrastructure or release run ID, reviewed before apply
+      confirmation:
+        description: Type DEPLOY TO PROD to authorize infrastructure plan and apply
         type: string
-        required: false
+        required: true
 permissions:
   contents: read
 concurrency:
@@ -18,121 +13,102 @@ concurrency:
   cancel-in-progress: false
 jobs:
   deployment:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY TO PROD'
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    environment: ${{ vars.GCP_GITHUB_ENVIRONMENT || 'dev' }}
+    environment: ${{ vars.GCP_GITHUB_ENVIRONMENT || 'prod' }}
     permissions:
       contents: read
-      actions: read
       id-token: write
     env:
       TF_IN_AUTOMATION: 'true'
       BACKEND_HCL: ${{ vars.GCP_BACKEND_HCL }}
       TFVARS: ${{ vars.GCP_TFVARS }}
     steps:
-      - name: Require restricted plan storage
-        run: test "$PRIVATE_REPOSITORY" = true
-        env:
-          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
+      - name: Prepare private runner files
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/gcp-deployment"
+          printf 'CLOUDSDK_CONFIG=%s/gcloud\n' "$RUNNER_TEMP/gcp-deployment" >> "$GITHUB_ENV"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
         with:
           terraform_version: '1.11.4'
           terraform_wrapper: false
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        id: deployer
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_APPLY_SERVICE_ACCOUNT }}
+          cleanup_credentials: true
+      - name: Keep deployer credentials outside the checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/gcp-deployment/deployer-credentials.json"
+          mv "$GOOGLE_GHA_CREDS_PATH" "$destination"
+          chmod 600 "$destination"
+          for variable in GOOGLE_GHA_CREDS_PATH GOOGLE_APPLICATION_CREDENTIALS CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE; do
+            printf '%s=%s\n' "$variable" "$destination" >> "$GITHUB_ENV"
+          done
       - uses: google-github-actions/setup-gcloud@6189d56e4096ee891640bb02ac264be376592d6a
       - name: Configure the single application root
         shell: bash
         run: |
           set -euo pipefail
           umask 077
-          test -n "$BACKEND_HCL" && test -n "$TFVARS"
+          {
+          test -n "$BACKEND_HCL"
+          test -n "$TFVARS"
           printf '%s\n' "$BACKEND_HCL" > infra/backend.hcl
           printf '%s\n' "$TFVARS" > infra/terraform.tfvars
           terraform -chdir=infra init -input=false -lockfile=readonly -backend-config=backend.hcl
-          terraform -chdir=infra validate
+          } > "$RUNNER_TEMP/gcp-deployment/init.log" 2>&1
       - name: Plan infrastructure changes without changing the deployed image
-        if: inputs.operation == 'plan'
         shell: bash
         run: |
           set -euo pipefail
           umask 077
+          {
           current=$(terraform -chdir=infra output -json deployment)
           jq -e '.enable_runtime == true' <<< "$current" >/dev/null
-          enabled=$(terraform -chdir=infra console <<< 'var.enable_runtime')
-          test "$enabled" = true
-          image=$(terraform -chdir=infra console <<< 'var.image' | jq -er .)
-          test "$image" = "$(jq -r '.image' <<< "$current")"
-          terraform -chdir=infra plan -input=false -lock-timeout=5m -out=reviewed.tfplan > infra/plan.log 2>&1
-          terraform -chdir=infra show -no-color reviewed.tfplan > infra/plan.txt
-          cd infra
-          sha256sum reviewed.tfplan backend.hcl > checksums.txt
-      - name: Store the exact sensitive plan for one day
-        if: inputs.operation == 'plan'
-        id: artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: deployment-plan
-          path: |
-            infra/reviewed.tfplan
-            infra/plan.txt
-            infra/checksums.txt
-          if-no-files-found: error
-          retention-days: 1
-      - name: Identify the plan for private review
-        if: inputs.operation == 'plan'
-        run: printf 'Review the [sensitive saved plan](%s). Commit `%s`, run `%s`. Dispatch apply separately with this run ID after review.\n' "$ARTIFACT_URL" "$GITHUB_SHA" "$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
-        env:
-          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
-      - name: Verify the selected plan run belongs to this commit and repository
-        if: inputs.operation == 'apply'
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]]
-          test "$PLAN_RUN_ID" != "$GITHUB_RUN_ID"
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PLAN_RUN_ID" | jq -e \
-            --arg sha "$GITHUB_SHA" --arg repo "$GITHUB_REPOSITORY" \
-            '.conclusion == "success" and .event == "workflow_dispatch" and .head_branch == "main" and .head_sha == $sha and .repository.full_name == $repo and (.path == ".github/workflows/infrastructure.yml" or .path == ".github/workflows/release.yml")' >/dev/null
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
-      - name: Retrieve only the verified run's saved plan
-        if: inputs.operation == 'apply'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: deployment-plan
-          path: infra
-          run-id: ${{ inputs.plan_run_id }}
-          github-token: ${{ github.token }}
-      - name: Apply the exact saved plan, never replan
-        if: inputs.operation == 'apply'
+          image=$(jq -er '.image | select(type == "string" and test("^[a-z0-9-]+-docker\\.pkg\\.dev/[a-z0-9-]+/[a-z0-9-]+/api@sha256:[a-f0-9]{64}$"))' <<< "$current")
+          printf 'enable_runtime = true\nimage = "%s"\n' "$image" > infra/release.auto.tfvars
+          } > "$RUNNER_TEMP/gcp-deployment/inputs.log" 2>&1
+          terraform -chdir=infra plan -input=false -lock-timeout=5m -out="$RUNNER_TEMP/gcp-deployment/deployment.tfplan" > "$RUNNER_TEMP/gcp-deployment/plan.stdout.log" 2> "$RUNNER_TEMP/gcp-deployment/plan.stderr.log" || { printf 'Terraform plan failed.\n' >&2; exit 1; }
+      - name: Apply the exact plan in this runner
         shell: bash
         run: |
           set -euo pipefail
           umask 077
-          cd infra
-          sha256sum -c checksums.txt
-          terraform apply -input=false -lock-timeout=5m reviewed.tfplan > apply.log 2>&1
+          terraform -chdir=infra apply -input=false -lock-timeout=5m "$RUNNER_TEMP/gcp-deployment/deployment.tfplan" > "$RUNNER_TEMP/gcp-deployment/apply.stdout.log" 2> "$RUNNER_TEMP/gcp-deployment/apply.stderr.log" || { printf 'Terraform apply failed.\n' >&2; exit 1; }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        if: inputs.operation == 'apply'
         with:
           node-version: '24'
           cache: npm
       - run: npm ci
-        if: inputs.operation == 'apply'
       - name: Wait for the MIG and HTTP endpoint, then smoke test
-        if: inputs.operation == 'apply'
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
+          {
           deployment=$(terraform -chdir=infra output -json deployment)
           gcloud compute instance-groups managed wait-until "$(jq -r '.mig' <<< "$deployment")" --stable \
             --project="$(jq -r '.project_id' <<< "$deployment")" --region="$(jq -r '.region' <<< "$deployment")" --timeout=900
           url=$(jq -er '.api_url' <<< "$deployment")
           curl --fail --silent --show-error --retry 30 --retry-all-errors --retry-delay 10 --max-time 10 "$url" >/dev/null
           SMOKE_ALLOW_HTTP=true node tests/smoke/api.js "$url"
+          } > "$RUNNER_TEMP/gcp-deployment/health.log" 2>&1
+      - name: Remove private deployment files
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf -- "$RUNNER_TEMP/gcp-deployment" infra/.terraform
+          rm -f -- infra/backend.hcl infra/terraform.tfvars infra/release.auto.tfvars
+          rm -f -- infra/errored.tfstate infra/crash.log infra/crash.*.log
+          if [[ -n "$ORIGINAL_CREDENTIALS" ]]; then rm -f -- "$ORIGINAL_CREDENTIALS"; fi
+        env:
+          ORIGINAL_CREDENTIALS: ${{ steps.deployer.outputs.credentials_file_path }}
