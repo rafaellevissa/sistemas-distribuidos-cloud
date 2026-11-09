@@ -83,22 +83,22 @@ jobs:
             exit 1
           }
           printf 'Full teardown requested. SQL and all uploaded objects will be permanently deleted after the verified-backup acknowledgement.\n' >> "$GITHUB_STEP_SUMMARY"
-      - name: Plan SQL deletion-protection release
+      - name: Plan data deletion-protection release
         shell: bash
         run: |
           set -euo pipefail
           umask 077
-          terraform -chdir=infra plan -input=false -no-color -lock-timeout=5m -target=module.database.google_sql_database_instance.app -out="$RUNNER_TEMP/gcp-destroy/unprotect-sql.tfplan" > "$RUNNER_TEMP/gcp-destroy/unprotect.stdout.log" 2> "$RUNNER_TEMP/gcp-destroy/unprotect.stderr.log" || {
-            printf 'Could not plan SQL deletion-protection release.\n' >&2
+          terraform -chdir=infra plan -input=false -no-color -lock-timeout=5m -target=module.database.google_sql_database_instance.app -target=module.storage.google_storage_bucket.uploads -out="$RUNNER_TEMP/gcp-destroy/unprotect-data.tfplan" > "$RUNNER_TEMP/gcp-destroy/unprotect.stdout.log" 2> "$RUNNER_TEMP/gcp-destroy/unprotect.stderr.log" || {
+            printf 'Could not plan SQL and uploads deletion-protection release.\n' >&2
             exit 1
           }
-      - name: Release SQL deletion protection
+      - name: Release data deletion protection
         shell: bash
         run: |
           set -euo pipefail
           umask 077
-          terraform -chdir=infra apply -input=false -no-color -lock-timeout=5m "$RUNNER_TEMP/gcp-destroy/unprotect-sql.tfplan" > "$RUNNER_TEMP/gcp-destroy/unprotect-apply.stdout.log" 2> "$RUNNER_TEMP/gcp-destroy/unprotect-apply.stderr.log" || {
-            printf 'Could not release SQL deletion protection. No full destroy was attempted.\n' >&2
+          terraform -chdir=infra apply -input=false -no-color -lock-timeout=5m "$RUNNER_TEMP/gcp-destroy/unprotect-data.tfplan" > "$RUNNER_TEMP/gcp-destroy/unprotect-apply.stdout.log" 2> "$RUNNER_TEMP/gcp-destroy/unprotect-apply.stderr.log" || {
+            printf 'Could not release SQL and uploads deletion protection. No full destroy was attempted; inspect resource state before any retry.\n' >&2
             exit 1
           }
       - name: Plan full application and data destruction
@@ -108,7 +108,7 @@ jobs:
           set -euo pipefail
           umask 077
           terraform -chdir=infra plan -destroy -input=false -no-color -lock-timeout=5m -out="$RUNNER_TEMP/gcp-destroy/full-destroy.tfplan" > "$RUNNER_TEMP/gcp-destroy/destroy-plan.stdout.log" 2> "$RUNNER_TEMP/gcp-destroy/destroy-plan.stderr.log" || {
-            printf 'Full destroy plan failed. SQL deletion protection has been released; review and restore it if destruction is not proceeding.\n' >&2
+            printf 'Full destroy plan failed. SQL and uploads deletion protections have been released; review and restore them if destruction is not proceeding.\n' >&2
             exit 1
           }
           terraform -chdir=infra show -json "$RUNNER_TEMP/gcp-destroy/full-destroy.tfplan" | jq -e '

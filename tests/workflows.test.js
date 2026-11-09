@@ -156,8 +156,8 @@ test('full destroy requires backup acknowledgement and applies a checked saved p
   const job = config.jobs['destroy-full'];
   const steps = job.steps;
   const preflight = steps.find((step) => step.name === 'Verify the exact production application state and backup acknowledgement').run;
-  const unlockPlan = steps.find((step) => step.name === 'Plan SQL deletion-protection release').run;
-  const unlockApply = steps.find((step) => step.name === 'Release SQL deletion protection').run;
+  const unlockPlan = steps.find((step) => step.name === 'Plan data deletion-protection release').run;
+  const unlockApply = steps.find((step) => step.name === 'Release data deletion protection').run;
   const destroyPlan = steps.find((step) => step.id === 'destroy-plan').run;
   const destroyApply = steps.find((step) => step.name === 'Apply exact full destroy plan').run;
   assert.deepEqual(Object.keys(config.on.workflow_dispatch.inputs), ['confirmation', 'backup_confirmation']);
@@ -170,12 +170,17 @@ test('full destroy requires backup acknowledgement and applies a checked saved p
   assert.ok(preflight.includes('.project_id == "dev-performance-359512"'));
   assert.ok(preflight.includes(String.raw`deletion_protection = false\ndestroy_upload_bucket_contents = true`));
   assert.match(unlockPlan, /-target=module\.database\.google_sql_database_instance\.app/);
-  assert.match(unlockApply, /unprotect-sql\.tfplan/);
+  assert.match(unlockPlan, /-target=module\.storage\.google_storage_bucket\.uploads/);
+  assert.doesNotMatch(unlockPlan, /plan -destroy/);
+  assert.match(unlockPlan, /-out="\$RUNNER_TEMP\/gcp-destroy\/unprotect-data\.tfplan"/);
+  assert.match(unlockApply, /"\$RUNNER_TEMP\/gcp-destroy\/unprotect-data\.tfplan"/);
   assert.match(destroyPlan, /plan -destroy/);
   assert.match(destroyPlan, /module\.database\.google_sql_database_instance\.app/);
   assert.match(destroyPlan, /module\.storage\.google_storage_bucket\.uploads/);
   assert.match(destroyApply, /full-destroy\.tfplan/);
-  assert.ok(steps.indexOf(steps.find((step) => step.name === 'Release SQL deletion protection')) < steps.indexOf(steps.find((step) => step.id === 'destroy-plan')));
+  const unlockPlanIndex = steps.findIndex((step) => step.name === 'Plan data deletion-protection release');
+  const unlockApplyIndex = steps.findIndex((step) => step.name === 'Release data deletion protection');
+  assert.ok(unlockPlanIndex < unlockApplyIndex && unlockApplyIndex < steps.findIndex((step) => step.id === 'destroy-plan'));
   assert.doesNotMatch(JSON.stringify(config), /infra\/bootstrap|terraform state rm/);
   for (const step of steps.filter((entry) => entry.run)) {
     const syntax = spawnSync('bash', ['-n'], { input: step.run, encoding: 'utf8' });
