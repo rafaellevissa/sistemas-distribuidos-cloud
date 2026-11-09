@@ -132,6 +132,7 @@ jobs:
           umask 077
           terraform -chdir=infra apply -input=false -no-color -lock-timeout=5m "$RUNNER_TEMP/gcp-destroy/full-destroy.tfplan" > "$RUNNER_TEMP/gcp-destroy/destroy-apply.stdout.log" 2> "$RUNNER_TEMP/gcp-destroy/destroy-apply.stderr.log" || {
             printf 'Full destroy apply failed; inspect GCP resource state before any retry.\n' >&2
+            node scripts/diagnose-terraform-destroy.js "$RUNNER_TEMP/gcp-destroy/destroy-apply.stderr.log" || printf 'Could not classify the private Terraform failure.\n' >&2
             exit 1
           }
       - name: Remove private deployment files

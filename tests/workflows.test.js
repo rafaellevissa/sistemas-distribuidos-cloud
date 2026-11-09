@@ -188,6 +188,40 @@ test('full destroy requires backup acknowledgement and applies a checked saved p
   }
 });
 
+test('full destroy classifies private errors without leaking diagnostics or continuing after failure', () => {
+  const { diagnose } = require('../scripts/diagnose-terraform-destroy');
+  const cases = [
+    ['Error 403: Permission denied\nwith module.storage.google_storage_bucket.uploads,', 'permission-denied', 'storage'],
+    ['Error: deletion_protection is enabled\nwith module.database.google_sql_database_instance.app,', 'deletion-protection', 'cloud-sql'],
+    ['Error: bucket is not empty; force_destroy required', 'bucket-not-empty', 'unclassified'],
+    ['Error: resourceInUse\nwith module.network.google_compute_network.vpc,', 'resource-in-use', 'compute'],
+    ['Error: retentionPolicyNotMet', 'retention-policy', 'unclassified'],
+    ['Error: timeout while waiting', 'timeout', 'unclassified'],
+    ['Error: Failed to persist state', 'state-persistence', 'unclassified'],
+    ['Error: unexpected provider failure', 'unclassified', 'unclassified'],
+  ];
+  for (const [log, category, family] of cases) {
+    const output = diagnose(`${log}\nSECRET_TOKEN=private-value\nhttps://private.example/error`);
+    assert.ok(output.includes(`failure categories: ${category}.`));
+    assert.ok(output.includes(`failure diagnostics: ${family}.`));
+    assert.doesNotMatch(output, /SECRET_TOKEN|private-value|private\.example|with module/);
+  }
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'destroy-failure-'));
+  try {
+    fs.mkdirSync(path.join(temporary, 'gcp-destroy'));
+    const apply = workflow('destroy-full').jobs['destroy-full'].steps.find((step) => step.name === 'Apply exact full destroy plan');
+    const result = runScript(`terraform() { printf 'Error 403: Permission denied SECRET_TOKEN=private-value\\n' >&2; return 7; }\n${apply.run}\nprintf 'UNREACHABLE'`, {
+      cwd: root, env: { RUNNER_TEMP: temporary },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /failure categories: permission-denied/);
+    assert.doesNotMatch(result.stdout + result.stderr, /SECRET_TOKEN|private-value|UNREACHABLE/);
+    assert.match(fs.readFileSync(path.join(temporary, 'gcp-destroy/destroy-apply.stderr.log'), 'utf8'), /SECRET_TOKEN=private-value/);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test('release tests before OIDC and isolates build-only tokens from deployer credentials', () => {
   const steps = workflow('release').jobs.release.steps;
   const testIndex = steps.findIndex((step) => step.run?.includes('npm run lint && npm test'));
